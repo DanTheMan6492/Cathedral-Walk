@@ -1,32 +1,48 @@
 import * as THREE from 'three';
+import vertSrc from './shaders/raytrace.vert.glsl?raw';
+import fragSrc from './shaders/raytrace.frag.glsl?raw';
 
-// Scene
+// Scene + camera
 const scene = new THREE.Scene();
-
-// Camera
 const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
-camera.position.z = 3;
+camera.position.set(0, 0, 0);
 
-// Renderer
 const renderer = new THREE.WebGLRenderer({ canvas: document.getElementById('app') });
 renderer.setSize(window.innerWidth, window.innerHeight);
 
-// Triangle
-const geometry = new THREE.BufferGeometry();
-const vertices = new Float32Array([
-     0,  1, 0,  // top
-    -1, -1, 0,  // bottom left
-     1, -1, 0,  // bottom right
-]);
+// Full-screen quad
+const geometry = new THREE.PlaneGeometry(2, 2);
+const material = new THREE.RawShaderMaterial({
+    vertexShader: vertSrc,
+    fragmentShader: fragSrc,
+    uniforms: {
+        uResolution:  { value: new THREE.Vector2(window.innerWidth, window.innerHeight) },
+        uCameraPos:   { value: camera.position },
+        uCameraMatrix:{ value: camera.matrixWorld },
+        uLightPos:    { value: new THREE.Vector3(5, 5, 0) },
+    },
+    depthTest: false,
+    depthWrite: false,
+});
 
-geometry.setAttribute('position', new THREE.BufferAttribute(vertices, 3));
-const material = new THREE.MeshBasicMaterial({ color: 0xffffff, side: THREE.DoubleSide });
-const triangle = new THREE.Mesh(geometry, material);
-scene.add(triangle);
+const quad = new THREE.Mesh(geometry, material);
+scene.add(quad);
 
-// Render loop
+// Resize handler
+window.addEventListener('resize', () => {
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    camera.aspect = window.innerWidth / window.innerHeight;
+    camera.updateProjectionMatrix();
+    material.uniforms.uResolution.value.set(window.innerWidth, window.innerHeight);
+});
+
 function animate() {
     requestAnimationFrame(animate);
+
+    // Keep camera matrix uniform in sync each frame
+    // TODO: hook up WASD + mouse look controls here once we build the camera controller
+    camera.updateMatrixWorld();
+
     renderer.render(scene, camera);
 }
 animate();
