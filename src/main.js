@@ -1,7 +1,7 @@
 import * as THREE from 'three';
 import vertSrc from './shaders/raytrace.vert.glsl?raw';
 import fragSrc from './shaders/raytrace.frag.glsl?raw';
-
+import { FlyControls } from 'three/examples/jsm/controls/FlyControls.js';
 // Scene + camera
 const scene = new THREE.Scene();
 const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
@@ -9,7 +9,19 @@ camera.position.set(0, 0, 0);
 
 const renderer = new THREE.WebGLRenderer({ canvas: document.getElementById('app') });
 renderer.setSize(window.innerWidth, window.innerHeight);
-
+let controls = new FlyControls(camera,renderer.domElement);
+controls.dragToLook=true;
+controls.rollSpeed=0.75;    
+controls.movementSpeed=10;     
+const loader = new THREE.ObjectLoader();
+//const obj = await loader.loadAsync('json file'); use parseAsync(object) for already existing object
+//scene.add(obj)
+/*loader.load('path to file', function(object) {scene.add(object);},   function ( xhr ) {
+                    console.log( ( xhr.loaded / xhr.total * 100 ) + '% loaded' );
+                },
+                function ( error ) {
+                    console.log( 'An error happened' );
+                });*/
 // Full-screen quad
 const geometry = new THREE.PlaneGeometry(2, 2);
 const material = new THREE.RawShaderMaterial({
@@ -36,12 +48,16 @@ window.addEventListener('resize', () => {
     material.uniforms.uResolution.value.set(window.innerWidth, window.innerHeight);
 });
 
+const clock = new THREE.Timer();
+
 function animate() {
     requestAnimationFrame(animate);
 
+    controls.update(0.01)
     // Keep camera matrix uniform in sync each frame
-    // TODO: hook up WASD + mouse look controls here once we build the camera controller
+    // TODO: hook up WASD + mouse look controls here once we build the camera controller: Done
     camera.updateMatrixWorld();
+    
 
     renderer.render(scene, camera);
 }
