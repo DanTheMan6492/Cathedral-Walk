@@ -43,18 +43,17 @@ export function packScene(object) {
             const c = index ? index.getX(i * 3 + 2) : i * 3 + 2;
 
             // Pack positions (3 floats per vertex, 3 vertices per triangle)
-            positions.push(posAttr.getX(a), posAttr.getY(a), posAttr.getZ(a));
-            positions.push(posAttr.getX(b), posAttr.getY(b), posAttr.getZ(b));
-            positions.push(posAttr.getX(c), posAttr.getY(c), posAttr.getZ(c));
+            positions.push(posAttr.getX(a), posAttr.getY(a), posAttr.getZ(a), 0.0);
+            positions.push(posAttr.getX(b), posAttr.getY(b), posAttr.getZ(b), 0.0);
+            positions.push(posAttr.getX(c), posAttr.getY(c), posAttr.getZ(c), 0.0);
 
-            // Pack normals (same layout as positions)
-            normals.push(normAttr.getX(a), normAttr.getY(a), normAttr.getZ(a));
-            normals.push(normAttr.getX(b), normAttr.getY(b), normAttr.getZ(b));
-            normals.push(normAttr.getX(c), normAttr.getY(c), normAttr.getZ(c));
+            normals.push(normAttr.getX(a), normAttr.getY(a), normAttr.getZ(a), 0.0);
+            normals.push(normAttr.getX(b), normAttr.getY(b), normAttr.getZ(b), 0.0);
+            normals.push(normAttr.getX(c), normAttr.getY(c), normAttr.getZ(c), 0.0);
         }
     });
 
-    const triCount   = positions.length / 9; // 9 floats per triangle (3 vertices * 3 floats)
+    const triCount   = positions.length / 12; // 9 floats per triangle (3 vertices * 3 floats)
     const texelCount = triCount * 3;         // 3 texels per triangle (one per vertex)
 
     // Textures are 2D to stay within GPU max texture width limits
@@ -64,8 +63,8 @@ export function packScene(object) {
 
     // Pad arrays to fill the full rectangle (GPU requires complete rows)
     const totalTexels = texWidth * texHeight;
-    const posPadded  = new Float32Array(totalTexels * 3); // 3 floats per texel (RGB)
-    const normPadded = new Float32Array(totalTexels * 3);
+    const posPadded  = new Float32Array(totalTexels * 4); // 4 floats per texel now
+    const normPadded = new Float32Array(totalTexels * 4);
     posPadded.set(positions);
     normPadded.set(normals);
 
@@ -85,7 +84,7 @@ function buildTexture(data, width, height) {
         data,
         width,
         height,
-        THREE.RGBFormat,
+        THREE.RGBAFormat,
         THREE.FloatType,
     );
     tex.needsUpdate = true;
