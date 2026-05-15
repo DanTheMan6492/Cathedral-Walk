@@ -2,8 +2,7 @@ import * as THREE from 'three';
 import vertSrc from './shaders/raytrace.vert.glsl?raw';
 import fragSrc from './shaders/raytrace.frag.glsl?raw';
 import { FlyControls } from 'three/examples/jsm/controls/FlyControls.js';
-// Scene + camera
-const scene = new THREE.Scene();
+// Camera used only for ray generation and controls.
 const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
 camera.position.set(0, 0, 0);
 
@@ -22,7 +21,10 @@ const loader = new THREE.ObjectLoader();
                 function ( error ) {
                     console.log( 'An error happened' );
                 });*/
-// Full-screen quad
+// Full-screen raytracing pass. Render it with a fixed orthographic camera so it
+// stays on screen while the controlled camera moves through the raytraced scene.
+const screenScene = new THREE.Scene();
+const screenCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
 const geometry = new THREE.PlaneGeometry(2, 2);
 const material = new THREE.RawShaderMaterial({
     vertexShader: vertSrc,
@@ -38,7 +40,7 @@ const material = new THREE.RawShaderMaterial({
 });
 
 const quad = new THREE.Mesh(geometry, material);
-scene.add(quad);
+screenScene.add(quad);
 
 // Resize handler
 window.addEventListener('resize', () => {
@@ -59,6 +61,6 @@ function animate() {
     camera.updateMatrixWorld();
     
 
-    renderer.render(scene, camera);
+    renderer.render(screenScene, screenCamera);
 }
 animate();

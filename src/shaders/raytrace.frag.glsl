@@ -1,133 +1,246 @@
 // raytrace.frag
 // Ray Tracing pipeline
-
+//
 // Each fragment invocation handles one pixel.
+// Supports three unrolled ray bounces across three material types:
+//   MAT_DIFFUSE     - Lambertian shading with shadow rays
+//   MAT_REFLECTIVE  - Mirror reflection with specular highlight
+//   MAT_TRANSPARENT - Glass refraction (Snell's law) with TIR fallback
 
-// - Reconstructing a ray direction
-// - Traversing the BVH texture to find the nearest triangle intersection
-// - Applying bump map perturbations to the surface normal at hit points
-// - Writing the final color for the pixel
-
-// Requires:
-// camera position, camera world matrix, BVH texture, 
-// triangle data texture, normal map textures, light positions/colors
 precision highp float;
 
-uniform vec2 uResolution;
-uniform vec3 uCameraPos;
-uniform mat4 uCameraMatrix;
-uniform vec3 uLightPos;
+uniform vec2  uResolution;
+uniform vec3  uCameraPos;
+uniform mat4  uCameraMatrix;
+uniform vec3  uLightPos;
 
+const int MAT_DIFFUSE     = 0;
+const int MAT_REFLECTIVE  = 1;
+const int MAT_TRANSPARENT = 2;
 
-// The return type for all intersection functions.
-struct HitInfo {
-    bool hit;
-    float t;      // distance along the ray to the hit point
-    vec3 normal;  // surface normal at the hit point
+struct HitRecord {
+    bool  hit;
+    float t;
+    vec3  pos;
+    vec3  normal;
+    int   matType;
+    vec3  albedo;
+    float ior;
 };
 
-// ---- Object ---------------------------------------------------------------
-// represents any primitive in the scene.
+// ---- Sphere intersection ---------------------------------------------------
 
-// All primitive types
-const int TYPE_SPHERE = 0;
+HitRecord hitSphere(vec3 center, float radius,
+                    int matType, vec3 albedo, float ior,
+                    vec3 ro, vec3 rd) {
+    HitRecord h;
+    h.hit     = false;
+    h.t       = 1e10;
+    h.pos     = vec3(0.0);
+    h.normal  = vec3(0.0, 1.0, 0.0);
+    h.matType = matType;
+    h.albedo  = albedo;
+    h.ior     = ior;
 
-struct Object {
-    int type;
-    vec3 position;
+    vec3  oc       = ro - center;
+    float b        = dot(oc, rd);
+    float c        = dot(oc, oc) - radius * radius;
+    float disc     = b * b - c;
+    if (disc < 0.0) return h;
 
-    // TYPE_SPHERE — data1.x = radius
-    vec3 data1;
-};
-// ---------------------------------------------------------------------------
+    float sqrtDisc = sqrt(disc);
+    float t        = -b - sqrtDisc;
+    if (t < 0.001) {
+        // Only take the far intersection when the ray starts inside the sphere.
+        if (c >= 0.0) return h;
+        t = -b + sqrtDisc;
+        if (t < 0.001) return h;
+    }
 
-
-// ---- Intersection functions -----------------------------------------------
-// One function per primitive type
-// All take (Object, ray origin, ray direction) and return HitInfo
-
-HitInfo intersectSphere(Object obj, vec3 ro, vec3 rd) {
-    HitInfo h;
-    h.hit = false;
-
-    float radius = obj.data1.x;
-    vec3 oc = ro - obj.position; //origin to center
-
-    // solve intersection quad: |ro + t*rd - center|^2 - radius^2 = 0
-    float b = dot(oc, rd);
-    float c = dot(oc, oc) - radius * radius;
-    float disc = b * b - c;
-
-    if (disc < 0.0) return h; // ray misses sphere
-
-    float t = -b - sqrt(disc); // nearest intersection
-    if (t < 0.001) return h;   // hit is behind the ray origin
-
-    h.hit = true;
-    h.t = t;
-    h.normal = normalize((ro + rd * t) - obj.position);
+    h.hit    = true;
+    h.t      = t;
+    h.pos    = ro + rd * t;
+    h.normal = normalize(h.pos - center);
     return h;
 }
 
-// ---------------------------------------------------------------------------
+// ---- Plane intersection (infinite, checkerboard diffuse) -------------------
 
+HitRecord hitPlane(vec3 point, vec3 normal, vec3 ro, vec3 rd) {
+    HitRecord h;
+    h.hit     = false;
+    h.t       = 1e10;
+    h.pos     = vec3(0.0);
+    h.normal  = normal;
+    h.matType = MAT_DIFFUSE;
+    h.albedo  = vec3(0.8);
+    h.ior     = 1.0;
 
-// ---- intersect ------------------------------------------------------------
+    float denom = dot(rd, normal);
+    if (abs(denom) < 0.0001) return h;
 
-HitInfo intersect(Object obj, vec3 ro, vec3 rd) {
-    if (obj.type == TYPE_SPHERE) return intersectSphere(obj, ro, rd);
+    float t = dot(point - ro, normal) / denom;
+    if (t < 0.001) return h;
 
-    // add branches for new primitive types here
+    h.hit = true;
+    h.t   = t;
+    h.pos = ro + rd * t;
 
-    // Fallback
-    HitInfo miss;
-    miss.hit = false;
-    return miss;
+    float check = mod(floor(h.pos.x * 0.5) + floor(h.pos.z * 0.5), 2.0);
+    h.albedo = (check < 0.5) ? vec3(0.9) : vec3(0.15);
+    return h;
 }
-// ---------------------------------------------------------------------------
 
+// ---- Scene: three spheres + ground plane -----------------------------------
 
-// ---- Scene ----------------------------------------------------------------
-// Hardcoded list of objects for now.
-// TODO: replace with a texture-based scene buffer read from ScenePacker
+HitRecord intersectScene(vec3 ro, vec3 rd) {
+    HitRecord best;
+    best.hit     = false;
+    best.t       = 1e10;
+    best.pos     = vec3(0.0);
+    best.normal  = vec3(0.0, 1.0, 0.0);
+    best.matType = MAT_DIFFUSE;
+    best.albedo  = vec3(0.0);
+    best.ior     = 1.0;
 
-HitInfo intersectScene(vec3 ro, vec3 rd) {
-    Object sphere;
-    sphere.type = TYPE_SPHERE;
-    sphere.position = vec3(0.0, 0.0, -4.0);
-    sphere.data1 = vec3(1.0, 0.0, 0.0); // radius = 1.0
+    HitRecord h;
 
-    return intersect(sphere, ro, rd);
+    h = hitSphere(vec3(-2.5, 0.0, -5.0), 1.0,
+                  MAT_DIFFUSE, vec3(0.85, 0.25, 0.15), 1.0, ro, rd);
+    if (h.hit && h.t < best.t) best = h;
+
+    h = hitSphere(vec3(0.0, 0.0, -5.0), 1.0,
+                  MAT_REFLECTIVE, vec3(0.92, 0.92, 0.92), 1.0, ro, rd);
+    if (h.hit && h.t < best.t) best = h;
+
+    h = hitSphere(vec3(2.5, 0.0, -5.0), 1.0,
+                  MAT_TRANSPARENT, vec3(0.96, 0.98, 1.0), 1.5, ro, rd);
+    if (h.hit && h.t < best.t) best = h;
+
+    h = hitPlane(vec3(0.0, -1.2, 0.0), vec3(0.0, 1.0, 0.0), ro, rd);
+    if (h.hit && h.t < best.t) best = h;
+
+    return best;
 }
-// ---------------------------------------------------------------------------
 
+// ---- Shadow ray ------------------------------------------------------------
+
+bool inShadow(vec3 pos) {
+    vec3  toLight   = uLightPos - pos;
+    float lightDist = length(toLight);
+    vec3  srd       = toLight / lightDist;
+    vec3  sro       = pos + srd * 0.002;
+
+    HitRecord h;
+
+    h = hitSphere(vec3(-2.5, 0.0, -5.0), 1.0,
+                  MAT_DIFFUSE, vec3(0.0), 1.0, sro, srd);
+    if (h.hit && h.t < lightDist) return true;
+
+    h = hitSphere(vec3(0.0, 0.0, -5.0), 1.0,
+                  MAT_REFLECTIVE, vec3(0.0), 1.0, sro, srd);
+    if (h.hit && h.t < lightDist) return true;
+
+    h = hitPlane(vec3(0.0, -1.2, 0.0), vec3(0.0, 1.0, 0.0), sro, srd);
+    if (h.hit && h.t < lightDist) return true;
+
+    return false;
+}
+
+// ---- Helpers ---------------------------------------------------------------
+
+vec3 skyColor(vec3 rd) {
+    float t = 0.5 * (normalize(rd).y + 1.0);
+    return mix(vec3(1.0), vec3(0.45, 0.65, 1.0), t);
+}
+
+vec3 shadeDiffuse(HitRecord h) {
+    vec3  toLight = normalize(uLightPos - h.pos);
+    float shadow  = inShadow(h.pos) ? 0.1 : 1.0;
+    float diff    = max(dot(h.normal, toLight), 0.0) * shadow;
+    return h.albedo * (diff + 0.15);
+}
+
+// ---- Bounce helper ---------------------------------------------------------
+// Given an incident ray hitting a reflective or transparent surface, return
+// the new ray direction after the bounce.
+
+vec3 bounceDir(HitRecord h, vec3 rd) {
+    if (h.matType == MAT_REFLECTIVE) {
+        return reflect(rd, h.normal);
+    }
+
+    bool  entering = dot(rd, h.normal) < 0.0;
+    vec3  n        = entering ? h.normal : -h.normal;
+    float eta      = entering ? (1.0 / h.ior) : h.ior;
+    vec3  refDir   = refract(rd, n, eta);
+    if (dot(refDir, refDir) < 0.001) refDir = reflect(rd, n);
+    return refDir;
+}
+
+// ---- Main ------------------------------------------------------------------
+// Fully unrolled: no loops, no break, guaranteed output at every path.
+// Three bounces are enough for diffuse, mirror, and glass enter/exit paths.
 
 void main() {
-    
-    // Reconstruct ray direction from this pixel's screen coordinate
     vec2 uv = (gl_FragCoord.xy / uResolution) * 2.0 - 1.0;
-    uv.x *= uResolution.x / uResolution.y; // correct for aspect ratio
+    uv.x   *= uResolution.x / uResolution.y;
 
     vec3 rd = normalize(mat3(uCameraMatrix) * vec3(uv, -1.0));
     vec3 ro = uCameraPos;
 
-    // Cast primary ray into the scene
-    HitInfo h = intersectScene(ro, rd);
+    // ---- Bounce 0 ----------------------------------------------------------
+    HitRecord h0 = intersectScene(ro, rd);
 
-    if (!h.hit) {
-        // Background — TODO: replace with skybox or gradient
-        gl_FragColor = vec4(0.1, 0.1, 0.15, 1.0);
+    if (!h0.hit) {
+        gl_FragColor = vec4(skyColor(rd), 1.0);
         return;
     }
 
-    // Basic diffuse shading using the surface normal and light position
-    // TODO: expand into a full material system
-    vec3 hitPoint = ro + rd * h.t;
-    vec3 toLight = normalize(uLightPos - hitPoint);
-    float diffuse = max(dot(h.normal, toLight), 0.0);
+    if (h0.matType == MAT_DIFFUSE) {
+        gl_FragColor = vec4(shadeDiffuse(h0), 1.0);
+        return;
+    }
 
-    // TODO: add shadow rays
-    
-    vec3 color = vec3(0.8, 0.8, 0.8) * diffuse;
-    gl_FragColor = vec4(color, 1.0);
+    // Reflective surfaces add a specular term; transparent surfaces only bend.
+    vec3 color0 = vec3(0.0);
+    if (h0.matType == MAT_REFLECTIVE) {
+        vec3  toLight = normalize(uLightPos - h0.pos);
+        float spec    = pow(max(dot(reflect(-toLight, h0.normal), -rd), 0.0), 128.0);
+        color0 = h0.albedo * spec * 0.6;
+    }
+
+    vec3 tp0 = h0.albedo;
+    rd = bounceDir(h0, rd);
+    ro = h0.pos + rd * 0.002;
+
+    // ---- Bounce 1 ----------------------------------------------------------
+    HitRecord h1 = intersectScene(ro, rd);
+
+    if (!h1.hit) {
+        gl_FragColor = vec4(color0 + tp0 * skyColor(rd), 1.0);
+        return;
+    }
+
+    if (h1.matType == MAT_DIFFUSE) {
+        gl_FragColor = vec4(color0 + tp0 * shadeDiffuse(h1), 1.0);
+        return;
+    }
+
+    vec3 color1 = color0;
+    if (h1.matType == MAT_REFLECTIVE) {
+        vec3  toLight = normalize(uLightPos - h1.pos);
+        float spec    = pow(max(dot(reflect(-toLight, h1.normal), -rd), 0.0), 128.0);
+        color1 += tp0 * h1.albedo * spec * 0.6;
+    }
+
+    vec3 tp1 = tp0 * h1.albedo;
+    rd = bounceDir(h1, rd);
+    ro = h1.pos + rd * 0.002;
+
+    // ---- Bounce 2 (final) --------------------------------------------------
+    HitRecord h2 = intersectScene(ro, rd);
+
+    vec3 finalColor = h2.hit ? shadeDiffuse(h2) : skyColor(rd);
+    gl_FragColor = vec4(color1 + tp1 * finalColor, 1.0);
 }
