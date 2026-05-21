@@ -2,7 +2,8 @@ import * as THREE from 'three';
 import { OBJLoader } from 'three/examples/jsm/loaders/OBJLoader.js';
 import vertSrc from './shaders/raytrace.vert.glsl?raw';
 import fragSrc from './shaders/raytrace.frag.glsl?raw';
-import { packScene } from './core/ScenePacker.js';
+import { flattenScene, reorderTris, packTextures, packBVH } from './core/ScenePacker.js';
+import { buildBVH } from './core/BVH.js';
 import { RayCamera } from './core/RayCamera.js';
 
 // ---- Three.js setup ---------------------------------------------------------
@@ -34,6 +35,9 @@ const material = new THREE.RawShaderMaterial({
         uNormals:       { value: null },
         uTriangleCount: { value: 0 },
         uTexWidth:      { value: 0 },
+        uBVH:           { value: null },
+        uBVHNodeCount:  { value: 0 },
+        uBVHTexWidth:   { value: 0 },
     },
     depthTest: false,
     depthWrite: false,
@@ -52,16 +56,32 @@ const rayCamera = new RayCamera(
 
 const loader = new OBJLoader();
 loader.load(
-    '/assets/models/test_cube.obj',
+    '/assets/models/teapot.obj',
     (object) => {
-        const { positionTexture, normalTexture, triCount, texWidth } = packScene(object);
+        // Step 1: extract raw triangle data from the scene graph
+        const { rawPositions, rawNormals } = flattenScene(object);
+
+        // Step 2: build the BVH and get the reordered triangle index array
+        const { nodes, orderedTris } = buildBVH(rawPositions);
+
+        // Step 3: reorder position and normal arrays to match BVH leaf order
+        const { rawPositions: rPos, rawNormals: rNorm } = reorderTris(rawPositions, rawNormals, orderedTris);
+
+        // Step 4: pack reordered data into GPU textures
+        const { positionTexture, normalTexture, triCount, texWidth } = packTextures(rPos, rNorm);
+
+        // Step 5: pack BVH nodes into a GPU texture
+        const { bvhTexture, nodeCount, texWidth: bvhTexWidth } = packBVH(nodes);
 
         material.uniforms.uPositions.value     = positionTexture;
         material.uniforms.uNormals.value       = normalTexture;
         material.uniforms.uTriangleCount.value = triCount;
         material.uniforms.uTexWidth.value      = texWidth;
+        material.uniforms.uBVH.value           = bvhTexture;
+        material.uniforms.uBVHNodeCount.value  = nodeCount;
+        material.uniforms.uBVHTexWidth.value   = bvhTexWidth;
 
-        console.log(`Scene loaded: ${triCount} triangles`);
+        console.log(`Scene loaded: ${triCount} triangles, ${nodeCount} BVH nodes`);
     },
     (xhr) => {
         if (xhr.total) {
@@ -86,10 +106,8 @@ const clock = new THREE.Clock();
 function animate() {
     requestAnimationFrame(animate);
     const delta = clock.getDelta();
-
     rayCamera.update(delta);
     rayCamera.applyToUniforms(material.uniforms);
-
     renderer.render(scene, camera);
 }
 animate();
