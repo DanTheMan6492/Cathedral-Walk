@@ -18,6 +18,9 @@ uniform sampler2D uPositions;
 uniform sampler2D uNormals;
 uniform int uTriangleCount;
 uniform int uTexWidth;
+uniform sampler2D uBVH;
+uniform int uBVHNodeCount;
+uniform int uBVHTexWidth;
 
 out vec4 fragColor;
 
@@ -47,13 +50,20 @@ struct HitRecord {
     float ior;
 };
 
-// ---- Texture fetch helper -------------------------------------------------
-// Converts a flat texel index to 2D coordinates and fetches the value.
+// ---- Texture fetch helpers ------------------------------------------------
+// Each uses its own tex width uniform since position/normal and BVH textures
+// may have different dimensions.
 
 vec3 fetchTexel(sampler2D tex, int flatIndex) {
     int col = flatIndex - (flatIndex / uTexWidth) * uTexWidth;
     int row = flatIndex / uTexWidth;
     return texelFetch(tex, ivec2(col, row), 0).xyz;
+}
+
+vec4 fetchBVHTexel(int flatIndex) {
+    int col = flatIndex - (flatIndex / uBVHTexWidth) * uBVHTexWidth;
+    int row = flatIndex / uBVHTexWidth;
+    return texelFetch(uBVH, ivec2(col, row), 0);
 }
 
 // ---- Object ---------------------------------------------------------------
@@ -104,7 +114,6 @@ HitRecord intersectSphere(Object obj, vec3 ro, vec3 rd) {
     float sqrtDisc = sqrt(disc);
     float t        = -b - sqrtDisc;
     if (t < 0.0001) {
-        // Only take the far intersection when the ray starts inside the sphere
         if (c >= 0.0) return h;
         t = -b + sqrtDisc;
         if (t < 0.0001) return h;
@@ -119,7 +128,6 @@ HitRecord intersectSphere(Object obj, vec3 ro, vec3 rd) {
 
 // Moller-Trumbore triangle intersection
 // data0 = v0, data1 = v1, data2 = v2
-// TODO: understand this algorithm a bit better...
 HitRecord intersectTriangle(Object obj, vec3 ro, vec3 rd) {
     HitRecord h;
     h.hit     = false;
@@ -174,8 +182,7 @@ HitRecord intersectPlane(Object obj, vec3 ro, vec3 rd) {
 
     vec3 point  = obj.data0;
     vec3 normal = obj.data1;
-
-    h.normal = normal; // now safe to assign since normal is defined
+    h.normal    = normal;
 
     float denom = dot(rd, normal);
     if (abs(denom) < 0.0001) return h;
@@ -187,37 +194,133 @@ HitRecord intersectPlane(Object obj, vec3 ro, vec3 rd) {
     h.t   = t;
     h.pos = ro + rd * t;
 
-    // Checkerboard pattern overwrites albedo at hit point
     float check = mod(floor(h.pos.x * 0.5) + floor(h.pos.z * 0.5), 2.0);
     h.albedo = (check < 0.5) ? vec3(0.9) : vec3(0.15);
     return h;
 }
 
-// TODO: add intersectBox() etc. here as new primitives are added
-// ---------------------------------------------------------------------------
-
-
 // ---- intersect ------------------------------------------------------------
-// The polymorphic dispatch point.
-// Material is already baked into HitRecord by each intersection function.
 
 HitRecord intersect(Object obj, vec3 ro, vec3 rd) {
     if (obj.type == TYPE_SPHERE)   return intersectSphere(obj, ro, rd);
     if (obj.type == TYPE_TRIANGLE) return intersectTriangle(obj, ro, rd);
     if (obj.type == TYPE_PLANE)    return intersectPlane(obj, ro, rd);
 
-    // TODO: add branches for new primitive types here
-
     HitRecord miss;
     miss.hit = false;
     return miss;
 }
-// ---------------------------------------------------------------------------
 
+// ---- AABB ray test --------------------------------------------------------
+// https://en.wikipedia.org/wiki/Slab_method 
+// Slab method: for each axis compute the interval where the ray is inside
+// that axis's slab, then intersect all three intervals.
+// Returns true if the ray hits the box closer than maxT.
+
+bool hitAABB(vec3 boxMin, vec3 boxMax, vec3 ro, vec3 rd, float maxT) {
+    // Compute per-axis intersection intervals
+    vec3 invRd = 1.0 / rd;
+    vec3 t0    = (boxMin - ro) * invRd; // entry distances per axis
+    vec3 t1    = (boxMax - ro) * invRd; // exit  distances per axis
+
+    // Sort so tMin < tMax on each axis
+    vec3 tMin = min(t0, t1);
+    vec3 tMax = max(t0, t1);
+
+    // The ray is inside the box on the interval [max(tMin), min(tMax)]
+    float tEnter = max(max(tMin.x, tMin.y), tMin.z);
+    float tExit  = min(min(tMax.x, tMax.y), tMax.z);
+
+    return tExit >= max(tEnter, 0.0) && tEnter < maxT;
+}
+
+// ---- BVH traversal --------------------------------------------------------
+// Reads a node from the BVH texture.
+// Node i occupies texels [i*3, i*3+1, i*3+2]:
+//   texel 0: [ box.min.xyz, isLeaf        ]
+//   texel 1: [ box.max.xyz, unused        ]
+//   texel 2: [ data0,       data1, unused ]
+//     interior: data0 = leftIndex,  data1 = rightIndex
+//     leaf:     data0 = triStart,   data1 = triCount
+
+const int BVH_STACK_SIZE = 64;
+
+HitRecord intersectBVH(vec3 ro, vec3 rd) {
+    HitRecord closest;
+    closest.hit     = false;
+    closest.t       = 1e10;
+    closest.pos     = vec3(0.0);
+    closest.normal  = vec3(0.0, 1.0, 0.0);
+    closest.matType = MAT_DIFFUSE;
+    closest.albedo  = vec3(0.8);
+    closest.ior     = 1.0;
+
+    // Iterative stack-based traversal — GLSL has no recursion
+    int stack[BVH_STACK_SIZE];
+    int stackPtr = 0;
+    stack[stackPtr++] = 0; // push root node
+
+    while (stackPtr > 0) {
+        int nodeIndex = stack[--stackPtr]; // pop
+
+        // Read node from BVH texture
+        int   base   = nodeIndex * 3;
+        vec4  t0     = fetchBVHTexel(base + 0);
+        vec4  t1     = fetchBVHTexel(base + 1);
+        vec4  t2     = fetchBVHTexel(base + 2);
+
+        vec3  boxMin = t0.xyz;
+        vec3  boxMax = t1.xyz;
+        bool  isLeaf = t0.w > 0.5;
+
+        // Skip this node if the ray misses its bounding box
+        if (!hitAABB(boxMin, boxMax, ro, rd, closest.t)) continue;
+
+        if (isLeaf) {
+            // Test all triangles in this leaf
+            int triStart = int(t2.x);
+            int triCount = int(t2.y);
+
+            for (int i = triStart; i < triStart + triCount; i++) {
+                int base3 = i * 3;
+
+                Object tri;
+                tri.type       = TYPE_TRIANGLE;
+                tri.mat.type   = MAT_DIFFUSE;
+                tri.mat.albedo = vec3(0.8);
+                tri.mat.ior    = 1.0;
+                tri.data0 = fetchTexel(uPositions, base3 + 0);
+                tri.data1 = fetchTexel(uPositions, base3 + 1);
+                tri.data2 = fetchTexel(uPositions, base3 + 2);
+
+                HitRecord h = intersect(tri, ro, rd);
+
+                if (h.hit && h.t < closest.t) {
+                    closest = h;
+                    closest.normal = normalize(
+                        fetchTexel(uNormals, base3 + 0) +
+                        fetchTexel(uNormals, base3 + 1) +
+                        fetchTexel(uNormals, base3 + 2)
+                    );
+                }
+            }
+        } else {
+            // Push both children onto the stack
+            // Right is pushed first so left is processed first (LIFO)
+            int leftIndex  = int(t2.x);
+            int rightIndex = int(t2.y);
+
+            if (stackPtr < BVH_STACK_SIZE - 1) {
+                stack[stackPtr++] = rightIndex;
+                stack[stackPtr++] = leftIndex;
+            }
+        }
+    }
+
+    return closest;
+}
 
 // ---- Scene ----------------------------------------------------------------
-// TODO: once BVH is added, replace the linear loop with BVH traversal.
-//       The fetchTexel calls and HitRecord logic stay identical.
 
 HitRecord intersectScene(vec3 ro, vec3 rd) {
     HitRecord closest;
@@ -266,49 +369,25 @@ HitRecord intersectScene(vec3 ro, vec3 rd) {
 
     Object p0;
     p0.type       = TYPE_PLANE;
-    p0.data0      = vec3(0.0, -1.2, 0.0); // point on plane
-    p0.data1      = vec3(0.0,  1.0, 0.0); // normal (pointing up)
+    p0.data0      = vec3(0.0, -1.2, 0.0);
+    p0.data1      = vec3(0.0,  1.0, 0.0);
     p0.mat.type   = MAT_DIFFUSE;
-    p0.mat.albedo = vec3(0.8); // overwritten by checkerboard in intersectPlane
+    p0.mat.albedo = vec3(0.8);
     p0.mat.ior    = 1.0;
     h = intersect(p0, ro, rd);
     if (h.hit && h.t < closest.t) closest = h;
 
-    // -----------------------------------------------------------------------
+    // ---- BVH triangle traversal -------------------------------------------
+    // Replaces the old brute force loop — only tests triangles the BVH
+    // directs us to rather than all uTriangleCount triangles.
 
-    // ---- Triangle texture (cathedral geometry) ----------------------------
-    // TODO: once BVH is added, replace the linear loop with BVH traversal.
-
-    for (int i = 0; i < uTriangleCount; i++) {
-        int base = i * 3;
-
-        Object tri;
-        tri.type       = TYPE_TRIANGLE;
-        tri.mat.type   = MAT_DIFFUSE;
-        tri.mat.albedo = vec3(0.8);
-        tri.mat.ior    = 1.0;
-        tri.data0 = fetchTexel(uPositions, base + 0); // v0
-        tri.data1 = fetchTexel(uPositions, base + 1); // v1
-        tri.data2 = fetchTexel(uPositions, base + 2); // v2
-
-        h = intersect(tri, ro, rd);
-
-        if (h.hit && h.t < closest.t) {
-            closest = h;
-            // Average vertex normals from the normal texture
-            // TODO: interpolate using barycentric coordinates for smooth shading
-            closest.normal = normalize(
-                fetchTexel(uNormals, base + 0) +
-                fetchTexel(uNormals, base + 1) +
-                fetchTexel(uNormals, base + 2)
-            );
-        }
+    if (uBVHNodeCount > 0) {
+        h = intersectBVH(ro, rd);
+        if (h.hit && h.t < closest.t) closest = h;
     }
 
     return closest;
 }
-// ---------------------------------------------------------------------------
-
 
 // ---- Shadow ray ------------------------------------------------------------
 
@@ -318,7 +397,6 @@ bool inShadow(vec3 pos) {
     vec3  srd       = toLight / lightDist;
     vec3  sro       = pos + srd * 0.002;
 
-    // Cast shadow ray against the full scene
     HitRecord h = intersectScene(sro, srd);
     return h.hit && h.t < lightDist;
 }
@@ -338,8 +416,6 @@ vec3 shadeDiffuse(HitRecord h) {
 }
 
 // ---- Bounce helper ---------------------------------------------------------
-// Given an incident ray hitting a reflective or transparent surface,
-// return the new ray direction after the bounce.
 
 vec3 bounceDir(HitRecord h, vec3 rd) {
     if (h.matType == MAT_REFLECTIVE) {
@@ -354,31 +430,14 @@ vec3 bounceDir(HitRecord h, vec3 rd) {
     return refDir;
 }
 
-// ---- Main ------------------------------------------------------------------
-// Fully unrolled: no loops, guaranteed output at every path.
-// Three bounces cover diffuse, mirror, and glass enter/exit paths.
+// ---- traceRay --------------------------------------------------------------
+// Traces a single ray through the scene with up to three bounces.
 
-void main() {
-    vec2 uv = (gl_FragCoord.xy / uResolution) * 2.0 - 1.0;
-    uv.x   *= uResolution.x / uResolution.y;
-
-    // FOV-correct ray reconstruction — must match Three.js camera (75 degrees)
-    float tanHalfFov = tan(radians(75.0) * 0.5);
-    vec3 rd = normalize(mat3(uCameraMatrix) * vec3(uv * tanHalfFov, -1.0));
-    vec3 ro = uCameraPos;
-
-    // ---- Bounce 0 ----------------------------------------------------------
+vec3 traceRay(vec3 ro, vec3 rd) {
     HitRecord h0 = intersectScene(ro, rd);
 
-    if (!h0.hit) {
-        fragColor = vec4(skyColor(rd), 1.0);
-        return;
-    }
-
-    if (h0.matType == MAT_DIFFUSE) {
-        fragColor = vec4(shadeDiffuse(h0), 1.0);
-        return;
-    }
+    if (!h0.hit) return skyColor(rd);
+    if (h0.matType == MAT_DIFFUSE) return shadeDiffuse(h0);
 
     vec3 color0 = vec3(0.0);
     if (h0.matType == MAT_REFLECTIVE) {
@@ -391,18 +450,10 @@ void main() {
     rd = bounceDir(h0, rd);
     ro = h0.pos + rd * 0.002;
 
-    // ---- Bounce 1 ----------------------------------------------------------
     HitRecord h1 = intersectScene(ro, rd);
 
-    if (!h1.hit) {
-        fragColor = vec4(color0 + tp0 * skyColor(rd), 1.0);
-        return;
-    }
-
-    if (h1.matType == MAT_DIFFUSE) {
-        fragColor = vec4(color0 + tp0 * shadeDiffuse(h1), 1.0);
-        return;
-    }
+    if (!h1.hit) return color0 + tp0 * skyColor(rd);
+    if (h1.matType == MAT_DIFFUSE) return color0 + tp0 * shadeDiffuse(h1);
 
     vec3 color1 = color0;
     if (h1.matType == MAT_REFLECTIVE) {
@@ -415,9 +466,31 @@ void main() {
     rd = bounceDir(h1, rd);
     ro = h1.pos + rd * 0.002;
 
-    // ---- Bounce 2 (final) --------------------------------------------------
     HitRecord h2 = intersectScene(ro, rd);
+    return color1 + tp1 * (h2.hit ? shadeDiffuse(h2) : skyColor(rd));
+}
 
-    vec3 finalColor = h2.hit ? shadeDiffuse(h2) : skyColor(rd);
-    fragColor = vec4(color1 + tp1 * finalColor, 1.0);
+// ---- Main ------------------------------------------------------------------
+// Shoots SAMPLE_GRID x SAMPLE_GRID rays per pixel and averages the results.
+
+const int SAMPLE_GRID = 1;
+
+void main() {
+    float tanHalfFov = tan(radians(75.0) * 0.5);
+    vec3  totalColor = vec3(0.0);
+
+    for (int sy = 0; sy < SAMPLE_GRID; sy++) {
+        for (int sx = 0; sx < SAMPLE_GRID; sx++) {
+            vec2 offset = (vec2(float(sx), float(sy)) + 0.5) / float(SAMPLE_GRID);
+            vec2 uv = ((gl_FragCoord.xy + offset) / uResolution) * 2.0 - 1.0;
+            uv.x   *= uResolution.x / uResolution.y;
+
+            vec3 rd = normalize(mat3(uCameraMatrix) * vec3(uv * tanHalfFov, -1.0));
+            vec3 ro = uCameraPos;
+
+            totalColor += traceRay(ro, rd);
+        }
+    }
+
+    fragColor = vec4(totalColor / float(SAMPLE_GRID * SAMPLE_GRID), 1.0);
 }
