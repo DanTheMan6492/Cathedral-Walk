@@ -56,7 +56,7 @@ const rayCamera = new RayCamera(
 
 const loader = new OBJLoader();
 loader.load(
-    '/assets/models/teapot.obj',
+    '/assets/models/bunny.obj',
     (object) => {
         // Step 1: extract raw triangle data from the scene graph
         const { rawPositions, rawNormals } = flattenScene(object);
