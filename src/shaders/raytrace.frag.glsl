@@ -142,11 +142,18 @@ HitRecord intersectTriangle(Object obj, vec3 ro, vec3 rd) {
     vec3 v1 = obj.data1;
     vec3 v2 = obj.data2;
 
+    //plane normal computation
     vec3 e1 = v1 - v0;
     vec3 e2 = v2 - v0;
+    vec3 planenormal = cross(e1,e2);
+    float denom = planenorm.dot(planenorm);
 
     vec3  pvec = cross(rd, e2);
     float det  = dot(e1, pvec);
+
+    //check if ray and plane are parallel
+    float checkrayplane
+
     if (abs(det) < 0.000001) return h;
 
     float invDet = 1.0 / det;
