@@ -310,9 +310,9 @@ HitRecord intersectBVH(vec3 ro, vec3 rd) {
                 if (h.hit && h.t < closest.t) {
                     closest = h;
                     closest.normal = normalize(
-                       h.u* fetchTexel(uNormals, base3 + 0) +
-                        h.v*fetchTexel(uNormals, base3 + 1) +
-                        (1.0-h.u-h.v)*fetchTexel(uNormals, base3 + 2)
+                        (1.0-h.u-h.v)* fetchTexel(uNormals, base3 + 0) +
+                        h.u*fetchTexel(uNormals, base3 + 1) +
+                        h.v*fetchTexel(uNormals, base3 + 2)
                     );
                 }
             }
