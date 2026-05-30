@@ -36,7 +36,7 @@ export class RayCamera {
 
         // Store what keys are currently held
         // Use e.code instead of e.keys so we are layout independent
-        window.addEventListener('keydown', e => {this._keys[e.code] = true;});//console.log("Pressed:", e.code, "Current keys object:", this._keys);});
+        window.addEventListener('keydown', e => {this._keys[e.code] = true;});
         window.addEventListener('keyup',   e => this._keys[e.code] = false);
     }
 
@@ -52,19 +52,16 @@ export class RayCamera {
         const s = this.speed * delta;
 
         // modify position based on inputs and direction
-        if (this._keys['KeyW'])       {this.position.addScaledVector(forward,  s);}//console.log('1')}
+        if (this._keys['KeyW'])       {this.position.addScaledVector(forward,  s);}
         if (this._keys['KeyS'])      this.position.addScaledVector(forward, -s);
         if (this._keys['KeyA'])      this.position.addScaledVector(right,   -s);
         if (this._keys['KeyD'])      this.position.addScaledVector(right,    s);
         if (this._keys['Space'])     this.position.y += s;
         if (this._keys['ShiftLeft']) this.position.y -= s;
         if (this._keys['Digit2'])      {
-            this.FOV = Math.min(120, this.FOV + 10 * s); }
-            //console.log('2 pressed raycam')}
+            this.FOV = Math.max(Math.min(120, this.FOV + 10 * s),1); }
         if (this._keys['Digit1'])      {
-            this.FOV = Math.min(120, this.FOV - 10 * s); }
-            //console.log('2 pressed raycam')}
-
+            this.FOV = Math.max(Math.min(120, this.FOV - 10 * s),1); }
     }
 
     // ---- Shader uniform helpers ----------------------------------------------

@@ -106,12 +106,12 @@ window.addEventListener('resize', () => {
 
 // ---- Render loop ------------------------------------------------------------
 
-const clock = new THREE.Clock();
+const clock = new THREE.Timer();
 function animate() {
     requestAnimationFrame(animate);
     const delta = clock.getDelta();
+    clock.update();
     rayCamera.update(delta);
-    //console.log(camera.fov)
     rayCamera.applyToUniforms(material.uniforms);
     material.uniforms.uFOV.value = rayCamera.FOV;
     renderer.render(scene, camera);
