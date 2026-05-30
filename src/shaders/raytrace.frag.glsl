@@ -21,6 +21,7 @@ uniform int uTexWidth;
 uniform sampler2D uBVH;
 uniform int uBVHNodeCount;
 uniform int uBVHTexWidth;
+uniform int uFOV;
 
 out vec4 fragColor;
 
@@ -79,7 +80,7 @@ const int TYPE_SPHERE   = 0;
 const int TYPE_TRIANGLE = 1;
 const int TYPE_PLANE    = 2;
 // TODO: add TYPE_BOX etc. as needed
-
+const int TYPE_BOX      = 3;
 struct Object {
     int      type;
     Material mat;
@@ -488,7 +489,7 @@ vec3 traceRay(vec3 ro, vec3 rd) {
 const int SAMPLE_GRID = 1;
 
 void main() {
-    float tanHalfFov = tan(radians(75.0) * 0.5);
+    float tanHalfFov = tan(radians(uFOV.value) * 0.5);
     vec3  totalColor = vec3(0.0);
 
     for (int sy = 0; sy < SAMPLE_GRID; sy++) {

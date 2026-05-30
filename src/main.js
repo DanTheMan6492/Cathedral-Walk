@@ -38,6 +38,7 @@ const material = new THREE.RawShaderMaterial({
         uBVH:           { value: null },
         uBVHNodeCount:  { value: 0 },
         uBVHTexWidth:   { value: 0 },
+        uFOV:           { value: 75.0 },
     },
     depthTest: false,
     depthWrite: false,
@@ -56,7 +57,7 @@ const rayCamera = new RayCamera(
 
 const loader = new OBJLoader();
 loader.load(
-    '/assets/models/bunny.obj',
+    '/assets/models/wolf/Wolf_One_obj.obj',
     (object) => {
         // Step 1: extract raw triangle data from the scene graph
         const { rawPositions, rawNormals } = flattenScene(object);
@@ -80,6 +81,7 @@ loader.load(
         material.uniforms.uBVH.value           = bvhTexture;
         material.uniforms.uBVHNodeCount.value  = nodeCount;
         material.uniforms.uBVHTexWidth.value   = bvhTexWidth;
+        material.uniforms.uFOV.value           = 75.0;
 
         console.log(`Scene loaded: ${triCount} triangles, ${nodeCount} BVH nodes`);
     },
@@ -108,6 +110,7 @@ function animate() {
     const delta = clock.getDelta();
     rayCamera.update(delta);
     rayCamera.applyToUniforms(material.uniforms);
+    material.uniforms.uFOV.value = camera.fov;
     renderer.render(scene, camera);
 }
 animate();
