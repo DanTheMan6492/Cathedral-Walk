@@ -21,7 +21,7 @@ uniform int uTexWidth;
 uniform sampler2D uBVH;
 uniform int uBVHNodeCount;
 uniform int uBVHTexWidth;
-uniform int uFOV;
+uniform float uFOV;
 
 out vec4 fragColor;
 
@@ -489,7 +489,7 @@ vec3 traceRay(vec3 ro, vec3 rd) {
 const int SAMPLE_GRID = 1;
 
 void main() {
-    float tanHalfFov = tan(radians(uFOV.value) * 0.5);
+    float tanHalfFov = tan(radians(uFOV) * 0.5);
     vec3  totalColor = vec3(0.0);
 
     for (int sy = 0; sy < SAMPLE_GRID; sy++) {

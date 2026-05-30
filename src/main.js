@@ -4,7 +4,7 @@ import vertSrc from './shaders/raytrace.vert.glsl?raw';
 import fragSrc from './shaders/raytrace.frag.glsl?raw';
 import { flattenScene, reorderTris, packTextures, packBVH } from './core/ScenePacker.js';
 import { buildBVH } from './core/BVH.js';
-import { RayCamera } from './core/RayCamera.js';
+import { RayCamera } from './core/Raycamera.js';
 
 // ---- Three.js setup ---------------------------------------------------------
 // The Three.js camera is frozen at the origin — it exists only to satisfy
@@ -102,6 +102,8 @@ window.addEventListener('resize', () => {
     material.uniforms.uResolution.value.set(window.innerWidth, window.innerHeight);
 });
 
+// fov handler
+
 // ---- Render loop ------------------------------------------------------------
 
 const clock = new THREE.Clock();
@@ -109,8 +111,9 @@ function animate() {
     requestAnimationFrame(animate);
     const delta = clock.getDelta();
     rayCamera.update(delta);
+    //console.log(camera.fov)
     rayCamera.applyToUniforms(material.uniforms);
-    material.uniforms.uFOV.value = camera.fov;
+    material.uniforms.uFOV.value = rayCamera.FOV;
     renderer.render(scene, camera);
 }
 animate();
