@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import { OBJLoader } from 'three/examples/jsm/loaders/OBJLoader.js';
+import { MTLLoader } from 'three/examples/jsm/loaders/MTLLoader.js';
 import vertSrc from './shaders/raytrace.vert.glsl?raw';
 import fragSrc from './shaders/raytrace.frag.glsl?raw';
 import { flattenScene, reorderTris, packTextures, packBVH } from './core/ScenePacker.js';
@@ -33,12 +34,22 @@ const material = new THREE.RawShaderMaterial({
         uLightPos:      { value: new THREE.Vector3(3, 3, 3) },
         uPositions:     { value: null },
         uNormals:       { value: null },
+        uUVs:           { value: null },
         uTriangleCount: { value: 0 },
         uTexWidth:      { value: 0 },
         uBVH:           { value: null },
         uBVHNodeCount:  { value: 0 },
         uBVHTexWidth:   { value: 0 },
         uFOV:           { value: 75.0 },
+        // Per-material albedo lookup. Fixed-size array of 16; first N entries
+        // are filled from MTL Kd values, rest stay zero.
+        uMatAlbedo:     { value: Array.from({ length: 16 }, () => new THREE.Vector3()) },
+        uMatCount:      { value: 0 },
+        // Per-material diffuse texture. sampler2DArray of all unique map_Kd
+        // images, with per-material flags + layer indices.
+        uMatTextures:   { value: null },
+        uMatHasTex:     { value: new Array(16).fill(0) },
+        uMatLayer:      { value: new Array(16).fill(0) },
     },
     depthTest: false,
     depthWrite: false,
@@ -53,45 +64,157 @@ const rayCamera = new RayCamera(
     new THREE.Vector3(0, 0, 5)
 );
 
-// ---- OBJ loader -------------------------------------------------------------
+// ---- Material → texture URL table -------------------------------------------
+// Resolved from the MTL with fallbacks for two missing files:
+//   Wolf_Body  wants  textures/wolf col.jpg  (404) → fallback to Wolf_Body.jpg
+//   Wolf_Teeth wants  textures/fella3.jpg    (404) → no texture, use Kd
+// Wolf_Claws has no map_Kd in the MTL at all → no texture, use Kd.
 
-const loader = new OBJLoader();
-loader.load(
-    '/assets/models/wolf/Wolf_One_obj.obj',
-    (object) => {
-        // Step 1: extract raw triangle data from the scene graph
-        const { rawPositions, rawNormals } = flattenScene(object);
+const MATERIAL_TEXTURES = {
+    'Wolf_Body':  'textures/Wolf_Body.jpg',
+    'Wolf_Eyes':  'textures/Wolf_Eyes_1.jpg',
+    'Wolf_Fur':   'textures/Wolf_Body.jpg',
+    // Wolf_Claws / Wolf_Teeth: no entry → Kd fallback
+};
 
-        // Step 2: build the BVH and get the reordered triangle index array
-        const { nodes, orderedTris } = buildBVH(rawPositions);
+const TEX_LAYER_SIZE = 512;
 
-        // Step 3: reorder position and normal arrays to match BVH leaf order
-        const { rawPositions: rPos, rawNormals: rNorm } = reorderTris(rawPositions, rawNormals, orderedTris);
+// Load each unique map_Kd JPG, resample to TEX_LAYER_SIZE², and pack into a
+// single DataArrayTexture. Returns the texture plus per-material flags.
+async function loadMaterialTextures(materials, basePath) {
+    // Dedupe URLs so two materials referencing the same image share a layer
+    const urlToLayer = new Map();
+    for (const m of materials) {
+        const url = MATERIAL_TEXTURES[m.name];
+        if (url && !urlToLayer.has(url)) urlToLayer.set(url, urlToLayer.size);
+    }
 
-        // Step 4: pack reordered data into GPU textures
-        const { positionTexture, normalTexture, triCount, texWidth } = packTextures(rPos, rNorm);
-
-        // Step 5: pack BVH nodes into a GPU texture
-        const { bvhTexture, nodeCount, texWidth: bvhTexWidth } = packBVH(nodes);
-
-        material.uniforms.uPositions.value     = positionTexture;
-        material.uniforms.uNormals.value       = normalTexture;
-        material.uniforms.uTriangleCount.value = triCount;
-        material.uniforms.uTexWidth.value      = texWidth;
-        material.uniforms.uBVH.value           = bvhTexture;
-        material.uniforms.uBVHNodeCount.value  = nodeCount;
-        material.uniforms.uBVHTexWidth.value   = bvhTexWidth;
-        material.uniforms.uFOV.value           = 75.0;
-
-        console.log(`Scene loaded: ${triCount} triangles, ${nodeCount} BVH nodes`);
-    },
-    (xhr) => {
-        if (xhr.total) {
-            console.log(`Loading: ${(xhr.loaded / xhr.total * 100).toFixed(1)}%`);
+    const hasTex     = new Array(16).fill(0);
+    const layerIndex = new Array(16).fill(0);
+    for (let i = 0; i < materials.length; i++) {
+        const url = MATERIAL_TEXTURES[materials[i].name];
+        if (url) {
+            hasTex[i]     = 1;
+            layerIndex[i] = urlToLayer.get(url);
         }
-    },
-    (error) => console.error('OBJLoader error:', error)
-);
+    }
+
+    if (urlToLayer.size === 0) {
+        return { texture: null, hasTex, layerIndex, layerCount: 0 };
+    }
+
+    const layerCount = urlToLayer.size;
+    const buffer     = new Uint8Array(TEX_LAYER_SIZE * TEX_LAYER_SIZE * 4 * layerCount);
+
+    const canvas = document.createElement('canvas');
+    canvas.width  = TEX_LAYER_SIZE;
+    canvas.height = TEX_LAYER_SIZE;
+    const ctx = canvas.getContext('2d');
+
+    await Promise.all([...urlToLayer.entries()].map(([url, layer]) => {
+        return new Promise((resolve, reject) => {
+            const img = new Image();
+            img.onload = () => {
+                ctx.clearRect(0, 0, TEX_LAYER_SIZE, TEX_LAYER_SIZE);
+                // Flip Y to match OpenGL UV convention (origin bottom-left)
+                ctx.save();
+                ctx.scale(1, -1);
+                ctx.drawImage(img, 0, -TEX_LAYER_SIZE, TEX_LAYER_SIZE, TEX_LAYER_SIZE);
+                ctx.restore();
+                const imgData = ctx.getImageData(0, 0, TEX_LAYER_SIZE, TEX_LAYER_SIZE);
+                buffer.set(imgData.data, layer * TEX_LAYER_SIZE * TEX_LAYER_SIZE * 4);
+                resolve();
+            };
+            img.onerror = (e) => {
+                console.warn(`Material texture ${url} failed to load (layer ${layer})`);
+                resolve(); // resolve so Promise.all doesn't reject; layer stays black
+            };
+            img.src = basePath + url;
+        });
+    }));
+
+    const tex = new THREE.DataArrayTexture(buffer, TEX_LAYER_SIZE, TEX_LAYER_SIZE, layerCount);
+    tex.format      = THREE.RGBAFormat;
+    tex.type        = THREE.UnsignedByteType;
+    tex.wrapS       = THREE.RepeatWrapping;
+    tex.wrapT       = THREE.RepeatWrapping;
+    tex.minFilter   = THREE.LinearFilter;
+    tex.magFilter   = THREE.LinearFilter;
+    tex.needsUpdate = true;
+
+    return { texture: tex, hasTex, layerIndex, layerCount };
+}
+
+// ---- MTL + OBJ loader -------------------------------------------------------
+
+const mtlLoader = new MTLLoader();
+mtlLoader.setPath('/assets/models/wolf/');
+mtlLoader.load('Wolf_One_obj.mtl', (materials) => {
+    materials.preload();
+
+    const objLoader = new OBJLoader();
+    objLoader.setMaterials(materials);
+    objLoader.load(
+        '/assets/models/wolf/Wolf_One_obj.obj',
+        (object) => {
+            // Step 1: extract raw triangle data from the scene graph
+            const { rawPositions, rawNormals, rawUVs, rawMatIndices, materials } = flattenScene(object);
+
+            // Step 2: build the BVH and get the reordered triangle index array
+            const { nodes, orderedTris } = buildBVH(rawPositions);
+
+            // Step 3: reorder position, normal, UV AND matIndex arrays to match BVH leaf order
+            const {
+                rawPositions:  rPos,
+                rawNormals:    rNorm,
+                rawUVs:        rUV,
+                rawMatIndices: rMat,
+            } = reorderTris(rawPositions, rawNormals, rawUVs, rawMatIndices, orderedTris);
+
+            // Step 4: pack reordered data into GPU textures (matIndex baked into position.w)
+            const { positionTexture, normalTexture, uvTexture, triCount, texWidth } = packTextures(rPos, rNorm, rUV, rMat);
+
+            // Step 5: pack BVH nodes into a GPU texture
+            const { bvhTexture, nodeCount, texWidth: bvhTexWidth } = packBVH(nodes);
+
+            material.uniforms.uPositions.value     = positionTexture;
+            material.uniforms.uNormals.value       = normalTexture;
+            material.uniforms.uUVs.value           = uvTexture;
+            material.uniforms.uTriangleCount.value = triCount;
+            material.uniforms.uTexWidth.value      = texWidth;
+            material.uniforms.uBVH.value           = bvhTexture;
+            material.uniforms.uBVHNodeCount.value  = nodeCount;
+            material.uniforms.uBVHTexWidth.value   = bvhTexWidth;
+            material.uniforms.uFOV.value           = 75.0;
+
+            // Fill uMatAlbedo from extracted materials list (linear-space Kd).
+            for (let i = 0; i < materials.length && i < 16; i++) {
+                material.uniforms.uMatAlbedo.value[i].set(
+                    materials[i].albedo[0],
+                    materials[i].albedo[1],
+                    materials[i].albedo[2],
+                );
+            }
+            material.uniforms.uMatCount.value = materials.length;
+
+            console.log(`Scene loaded: ${triCount} triangles, ${nodeCount} BVH nodes, ${materials.length} materials`);
+
+            // Kick off async texture loading. Picture renders with Kd colors
+            // immediately; textures swap in once all JPGs are decoded.
+            loadMaterialTextures(materials, '/assets/models/wolf/').then(({ texture, hasTex, layerIndex }) => {
+                material.uniforms.uMatTextures.value = texture;
+                material.uniforms.uMatHasTex.value   = hasTex;
+                material.uniforms.uMatLayer.value    = layerIndex;
+            });
+        },
+        (xhr) => {
+            if (xhr.total) {
+                console.log(`Loading: ${(xhr.loaded / xhr.total * 100).toFixed(1)}%`);
+            }
+        },
+        (error) => console.error('OBJLoader error:', error)
+    );
+}, undefined, (error) => console.error('MTLLoader error:', error));
 
 // ---- Resize handler ---------------------------------------------------------
 

@@ -9,6 +9,7 @@
 
 precision highp float;
 precision highp sampler2D;
+precision highp sampler2DArray;
 
 uniform vec2  uResolution;
 uniform vec3  uCameraPos;
@@ -16,12 +17,27 @@ uniform mat4  uCameraMatrix;
 uniform vec3  uLightPos;
 uniform sampler2D uPositions;
 uniform sampler2D uNormals;
+uniform sampler2D uUVs;
 uniform int uTriangleCount;
 uniform int uTexWidth;
 uniform sampler2D uBVH;
 uniform int uBVHNodeCount;
 uniform int uBVHTexWidth;
 uniform float uFOV;
+
+// Per-material lookup. matIndex per triangle is baked into the .w slot of
+// vertex 0 of each triangle in the position texture (see packTextures).
+const int MAX_MATERIALS = 16;
+uniform vec3 uMatAlbedo[MAX_MATERIALS];
+uniform int  uMatCount;
+
+// Per-material diffuse texture. uMatTextures is a 2D-array texture, one
+// layer per unique map_Kd image. uMatHasTex[i] = 1 means material i has a
+// texture in uMatTextures at layer uMatLayer[i]; otherwise fall back to
+// uMatAlbedo[i] (Kd).
+uniform sampler2DArray uMatTextures;
+uniform int uMatHasTex[MAX_MATERIALS];
+uniform int uMatLayer [MAX_MATERIALS];
 
 out vec4 fragColor;
 
@@ -61,6 +77,14 @@ vec3 fetchTexel(sampler2D tex, int flatIndex) {
     int col = flatIndex - (flatIndex / uTexWidth) * uTexWidth;
     int row = flatIndex / uTexWidth;
     return texelFetch(tex, ivec2(col, row), 0).xyz;
+}
+
+// Same fetch but returns the full vec4 — needed where .w carries metadata
+// (e.g. matIndex packed into vertex 0 of the position texture).
+vec4 fetchTexel4(sampler2D tex, int flatIndex) {
+    int col = flatIndex - (flatIndex / uTexWidth) * uTexWidth;
+    int row = flatIndex / uTexWidth;
+    return texelFetch(tex, ivec2(col, row), 0);
 }
 
 vec4 fetchBVHTexel(int flatIndex) {
@@ -297,12 +321,16 @@ HitRecord intersectBVH(vec3 ro, vec3 rd) {
             for (int i = triStart; i < triStart + triCount; i++) {
                 int base3 = i * 3;
 
+                // Fetch v0 with .w; .w carries the per-triangle matIndex
+                vec4 v0Texel = fetchTexel4(uPositions, base3 + 0);
+                int  matIndex = int(v0Texel.w);
+
                 Object tri;
                 tri.type       = TYPE_TRIANGLE;
                 tri.mat.type   = MAT_DIFFUSE;
-                tri.mat.albedo = vec3(0.8);
+                tri.mat.albedo = uMatAlbedo[matIndex];
                 tri.mat.ior    = 1.0;
-                tri.data0 = fetchTexel(uPositions, base3 + 0);
+                tri.data0 = v0Texel.xyz;
                 tri.data1 = fetchTexel(uPositions, base3 + 1);
                 tri.data2 = fetchTexel(uPositions, base3 + 2);
 
@@ -315,6 +343,20 @@ HitRecord intersectBVH(vec3 ro, vec3 rd) {
                         h.u*fetchTexel(uNormals, base3 + 1) +
                         h.v*fetchTexel(uNormals, base3 + 2)
                     );
+
+                    // Diffuse texture sampling: interpolate UV barycentrically,
+                    // sample the per-material layer, modulate against Kd (MTL
+                    // convention map_Kd * Kd). Materials without a texture
+                    // keep the Kd that intersect() already wrote into closest.albedo.
+                    if (uMatHasTex[matIndex] == 1) {
+                        vec2 uv0   = fetchTexel(uUVs, base3 + 0).xy;
+                        vec2 uv1   = fetchTexel(uUVs, base3 + 1).xy;
+                        vec2 uv2   = fetchTexel(uUVs, base3 + 2).xy;
+                        vec2 hitUV = (1.0 - h.u - h.v) * uv0 + h.u * uv1 + h.v * uv2;
+                        vec3 texColor = texture(uMatTextures,
+                                                vec3(hitUV, float(uMatLayer[matIndex]))).rgb;
+                        closest.albedo = texColor * uMatAlbedo[matIndex];
+                    }
                 }
             }
         } else {

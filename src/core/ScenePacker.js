@@ -2,9 +2,19 @@
 // Handles all geometry extraction and texture packing for the raytracer.
 //
 // Pipeline:
-//   flattenScene(object)                        → rawPositions, rawNormals
-//   reorderTris(rawPositions, rawNormals, order) → rawPositions, rawNormals (reordered)
-//   packTextures(rawPositions, rawNormals)       → positionTexture, normalTexture, triCount, texWidth, texHeight
+//   flattenScene(object)
+//     → rawPositions, rawNormals, rawUVs, rawMatIndices, materials
+//   reorderTris(rawPositions, rawNormals, rawUVs, rawMatIndices, orderedTris)
+//     → rawPositions, rawNormals, rawUVs, rawMatIndices (reordered)
+//   packTextures(rawPositions, rawNormals, rawUVs, rawMatIndices)
+//     → positionTexture, normalTexture, uvTexture, triCount, texWidth, texHeight
+//
+// Per-triangle material index is packed into the .w slot of each triangle's
+// FIRST vertex texel in the position texture. The shader reads this with a
+// .w fetch on the first vertex of every hit triangle.
+//
+// UVs are stored in their own texture with the same layout as positions:
+// 3 texels per triangle, each (u, v, 0, 0).
 
 import * as THREE from 'three';
 
@@ -15,12 +25,41 @@ const TEX_WIDTH = 4096;
 // Returns raw Float32Arrays rather than textures — the BVH builder reads
 // these directly, and packTextures turns them into GPU textures afterwards.
 //
+// Also extracts per-triangle material index using geometry.groups, and a
+// deduplicated list of materials (name + linear-space Kd albedo).
+//
 // Layout: [x0,y0,z0,0, x1,y1,z1,0, x2,y2,z2,0, ...] (4 floats per vertex, RGBA padding)
 // Triangle i occupies floats [i*12 .. i*12+11]
 
 export function flattenScene(object) {
-    const positions = [];
-    const normals   = [];
+    const positions  = [];
+    const normals    = [];
+    const uvs        = []; // 4 floats per vertex (u, v, 0, 0) for RGBA padding
+    const matIndices = []; // one entry per triangle
+
+    // Deduplicate materials by name across all sub-meshes.
+    // Each unique material gets a stable global index used in matIndices.
+    const materialMap = new Map(); // name → { index, albedo:[r,g,b] }
+    const materials   = [];        // [{ name, albedo:[r,g,b] }, ...] indexed by global matIndex
+
+    // MTLLoader applies sRGB→linear to material.color. The rest of the scene
+    // (hardcoded sphere/plane albedos in the shader) is written as sRGB-ish
+    // perceptual values and used as-is, so we undo MTLLoader's conversion
+    // here to keep wolf albedos in the same color space as everything else.
+    const linearToSRGB = (c) => Math.pow(Math.max(0, c), 1 / 2.2);
+
+    function internMaterial(name, color) {
+        if (materialMap.has(name)) return materialMap.get(name).index;
+        const index  = materials.length;
+        const albedo = [
+            linearToSRGB(color.r),
+            linearToSRGB(color.g),
+            linearToSRGB(color.b),
+        ];
+        materialMap.set(name, { index, albedo });
+        materials.push({ name, albedo });
+        return index;
+    }
 
     object.traverse(child => {
         if (!child.isMesh) return;
@@ -30,8 +69,26 @@ export function flattenScene(object) {
 
         const posAttr  = geo.attributes.position;
         const normAttr = geo.attributes.normal;
+        const uvAttr   = geo.attributes.uv; // may be undefined for meshes without UVs
         const index    = geo.index;
         const triCount = index ? index.count / 3 : posAttr.count / 3;
+
+        // Per-triangle material lookup. geometry.groups partitions the index
+        // buffer into ranges, each tagged with a materialIndex into child.material[].
+        // start/count are in index-buffer entries, so /3 to get triangle ranges.
+        const childMats = Array.isArray(child.material) ? child.material : [child.material];
+        const groups = geo.groups.length > 0
+            ? geo.groups
+            : [{ start: 0, count: (index ? index.count : posAttr.count), materialIndex: 0 }];
+
+        const triMatIndex = new Array(triCount).fill(0);
+        for (const g of groups) {
+            const triStart = (g.start             / 3) | 0;
+            const triEnd   = ((g.start + g.count) / 3) | 0;
+            const mat      = childMats[g.materialIndex];
+            const matIdx   = internMaterial(mat.name, mat.color);
+            for (let t = triStart; t < triEnd; t++) triMatIndex[t] = matIdx;
+        }
 
         for (let i = 0; i < triCount; i++) {
             const a = index ? index.getX(i * 3 + 0) : i * 3 + 0;
@@ -45,12 +102,25 @@ export function flattenScene(object) {
             normals.push(normAttr.getX(a), normAttr.getY(a), normAttr.getZ(a), 0.0);
             normals.push(normAttr.getX(b), normAttr.getY(b), normAttr.getZ(b), 0.0);
             normals.push(normAttr.getX(c), normAttr.getY(c), normAttr.getZ(c), 0.0);
+
+            if (uvAttr) {
+                uvs.push(uvAttr.getX(a), uvAttr.getY(a), 0.0, 0.0);
+                uvs.push(uvAttr.getX(b), uvAttr.getY(b), 0.0, 0.0);
+                uvs.push(uvAttr.getX(c), uvAttr.getY(c), 0.0, 0.0);
+            } else {
+                uvs.push(0, 0, 0, 0,  0, 0, 0, 0,  0, 0, 0, 0);
+            }
+
+            matIndices.push(triMatIndex[i]);
         }
     });
 
     return {
-        rawPositions: new Float32Array(positions),
-        rawNormals:   new Float32Array(normals),
+        rawPositions:  new Float32Array(positions),
+        rawNormals:    new Float32Array(normals),
+        rawUVs:        new Float32Array(uvs),
+        rawMatIndices: new Uint32Array(matIndices),
+        materials,
     };
 }
 
@@ -61,9 +131,11 @@ export function flattenScene(object) {
 //
 // Must be called after buildBVH and before packTextures.
 
-export function reorderTris(rawPositions, rawNormals, orderedTris) {
-    const positions = [];
-    const normals   = [];
+export function reorderTris(rawPositions, rawNormals, rawUVs, rawMatIndices, orderedTris) {
+    const positions  = [];
+    const normals    = [];
+    const uvs        = [];
+    const matIndices = [];
 
     for (const triIndex of orderedTris) {
         const base = triIndex * 12; // 3 vertices * 4 floats
@@ -82,12 +154,22 @@ export function reorderTris(rawPositions, rawNormals, orderedTris) {
                 rawNormals[offset + 2],
                 0.0
             );
+            uvs.push(
+                rawUVs[offset + 0],
+                rawUVs[offset + 1],
+                0.0,
+                0.0
+            );
         }
+
+        matIndices.push(rawMatIndices[triIndex]);
     }
 
     return {
-        rawPositions: new Float32Array(positions),
-        rawNormals:   new Float32Array(normals),
+        rawPositions:  new Float32Array(positions),
+        rawNormals:    new Float32Array(normals),
+        rawUVs:        new Float32Array(uvs),
+        rawMatIndices: new Uint32Array(matIndices),
     };
 }
 
@@ -95,7 +177,7 @@ export function reorderTris(rawPositions, rawNormals, orderedTris) {
 // Takes raw position and normal arrays and uploads them to the GPU as
 // DataTextures the fragment shader can read via texelFetch.
 
-export function packTextures(rawPositions, rawNormals) {
+export function packTextures(rawPositions, rawNormals, rawUVs, rawMatIndices) {
     const triCount    = rawPositions.length / 12;
     const texelCount  = triCount * 3;
     const texWidth    = TEX_WIDTH;
@@ -104,12 +186,24 @@ export function packTextures(rawPositions, rawNormals) {
 
     const posPadded  = new Float32Array(totalTexels * 4);
     const normPadded = new Float32Array(totalTexels * 4);
+    const uvPadded   = new Float32Array(totalTexels * 4);
     posPadded.set(rawPositions);
     normPadded.set(rawNormals);
+    if (rawUVs) uvPadded.set(rawUVs);
+
+    // Bake per-triangle matIndex into the .w slot of vertex 0 of each triangle.
+    // Vertex 0 of triangle i starts at posPadded[i*12 + 0..3], so .w lives at +3.
+    // Vertices 1 and 2 keep .w = 0 (unused).
+    if (rawMatIndices) {
+        for (let i = 0; i < triCount; i++) {
+            posPadded[i * 12 + 3] = rawMatIndices[i];
+        }
+    }
 
     return {
         positionTexture: buildTexture(posPadded,  texWidth, texHeight),
         normalTexture:   buildTexture(normPadded, texWidth, texHeight),
+        uvTexture:       buildTexture(uvPadded,   texWidth, texHeight),
         triCount,
         texWidth,
         texHeight,
