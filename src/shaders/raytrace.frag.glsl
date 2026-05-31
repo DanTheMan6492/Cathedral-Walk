@@ -25,16 +25,10 @@ uniform int uBVHNodeCount;
 uniform int uBVHTexWidth;
 uniform float uFOV;
 
-// Per-material lookup. matIndex per triangle is baked into the .w slot of
-// vertex 0 of each triangle in the position texture (see packTextures).
 const int MAX_MATERIALS = 16;
 uniform vec3 uMatAlbedo[MAX_MATERIALS];
 uniform int  uMatCount;
 
-// Per-material diffuse texture. uMatTextures is a 2D-array texture, one
-// layer per unique map_Kd image. uMatHasTex[i] = 1 means material i has a
-// texture in uMatTextures at layer uMatLayer[i]; otherwise fall back to
-// uMatAlbedo[i] (Kd).
 uniform sampler2DArray uMatTextures;
 uniform int uMatHasTex[MAX_MATERIALS];
 uniform int uMatLayer [MAX_MATERIALS];
@@ -79,8 +73,6 @@ vec3 fetchTexel(sampler2D tex, int flatIndex) {
     return texelFetch(tex, ivec2(col, row), 0).xyz;
 }
 
-// Same fetch but returns the full vec4 — needed where .w carries metadata
-// (e.g. matIndex packed into vertex 0 of the position texture).
 vec4 fetchTexel4(sampler2D tex, int flatIndex) {
     int col = flatIndex - (flatIndex / uTexWidth) * uTexWidth;
     int row = flatIndex / uTexWidth;
@@ -321,7 +313,6 @@ HitRecord intersectBVH(vec3 ro, vec3 rd) {
             for (int i = triStart; i < triStart + triCount; i++) {
                 int base3 = i * 3;
 
-                // Fetch v0 with .w; .w carries the per-triangle matIndex
                 vec4 v0Texel = fetchTexel4(uPositions, base3 + 0);
                 int  matIndex = int(v0Texel.w);
 
@@ -344,10 +335,6 @@ HitRecord intersectBVH(vec3 ro, vec3 rd) {
                         h.v*fetchTexel(uNormals, base3 + 2)
                     );
 
-                    // Diffuse texture sampling: interpolate UV barycentrically,
-                    // sample the per-material layer, modulate against Kd (MTL
-                    // convention map_Kd * Kd). Materials without a texture
-                    // keep the Kd that intersect() already wrote into closest.albedo.
                     if (uMatHasTex[matIndex] == 1) {
                         vec2 uv0   = fetchTexel(uUVs, base3 + 0).xy;
                         vec2 uv1   = fetchTexel(uUVs, base3 + 1).xy;
