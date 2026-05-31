@@ -95,7 +95,7 @@ async function loadMaterialTextures(materials, basePath) {
     const canvas = document.createElement('canvas');
     canvas.width  = TEX_LAYER_SIZE;
     canvas.height = TEX_LAYER_SIZE;
-    const ctx = canvas.getContext('2d');
+    const ctx = canvas.getContext('2d',{willReadFrequently: true});
 
     await Promise.all([...urlToLayer.entries()].map(([url, layer]) => {
         return new Promise((resolve, reject) => {
@@ -199,16 +199,18 @@ mtlLoader.load('Wolf_One_obj.mtl', (materials) => {
 }, undefined, (error) => console.error('MTLLoader error:', error));
 
 // ---- Resize handler ---------------------------------------------------------
-
+const renderscale=0.5;
 window.addEventListener('resize', () => {
-    renderer.setSize(window.innerWidth, window.innerHeight);
+
+    renderer.setSize(window.innerWidth*renderscale, window.innerHeight*renderscale);
     camera.aspect = window.innerWidth / window.innerHeight;
     camera.updateProjectionMatrix();
-    material.uniforms.uResolution.value.set(window.innerWidth, window.innerHeight);
+    material.uniforms.uResolution.value.set(window.innerWidth *renderscale, window.innerHeight*renderscale);
 });
 
 // ---- Render loop ------------------------------------------------------------
-
+renderer.setSize(window.innerWidth*renderscale, window.innerHeight*renderscale);
+material.uniforms.uResolution.value.set(window.innerWidth *renderscale, window.innerHeight*renderscale);
 const clock = new THREE.Timer();
 function animate() {
     requestAnimationFrame(animate);
