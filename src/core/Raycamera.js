@@ -73,11 +73,13 @@ export class RayCamera {
         );
         return this._matrix;
     }
-    setfov(fov){this.FOV=fov;}
+    setfov(fov) {
+        this.FOV=fov;
+    }
     // Pushes position and matrix into a RawShaderMaterial's uniforms
     applyToUniforms(uniforms) {
         uniforms.uCameraPos.value.copy(this.position);
         uniforms.uCameraMatrix.value.copy(this.getMatrix());
-            uniforms.uFOV.value = this.FOV;
+        uniforms.uFOV.value = this.FOV;
     }
 }

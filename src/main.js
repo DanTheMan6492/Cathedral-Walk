@@ -5,7 +5,7 @@ import vertSrc from './shaders/raytrace.vert.glsl?raw';
 import fragSrc from './shaders/raytrace.frag.glsl?raw';
 import { flattenScene, reorderTris, packTextures, packBVH } from './core/ScenePacker.js';
 import { buildBVH } from './core/BVH.js';
-import { RayCamera } from './core/Raycamera.js';
+import { RayCamera } from './core/RayCamera.js';
 
 // ---- Three.js setup ---------------------------------------------------------
 // The Three.js camera is frozen at the origin — it exists only to satisfy
@@ -224,8 +224,6 @@ window.addEventListener('resize', () => {
     camera.updateProjectionMatrix();
     material.uniforms.uResolution.value.set(window.innerWidth, window.innerHeight);
 });
-
-// fov handler
 
 // ---- Render loop ------------------------------------------------------------
 
