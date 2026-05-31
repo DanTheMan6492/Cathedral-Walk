@@ -41,12 +41,8 @@ const material = new THREE.RawShaderMaterial({
         uBVHNodeCount:  { value: 0 },
         uBVHTexWidth:   { value: 0 },
         uFOV:           { value: 75.0 },
-        // Per-material albedo lookup. Fixed-size array of 16; first N entries
-        // are filled from MTL Kd values, rest stay zero.
         uMatAlbedo:     { value: Array.from({ length: 16 }, () => new THREE.Vector3()) },
         uMatCount:      { value: 0 },
-        // Per-material diffuse texture. sampler2DArray of all unique map_Kd
-        // images, with per-material flags + layer indices.
         uMatTextures:   { value: null },
         uMatHasTex:     { value: new Array(16).fill(0) },
         uMatLayer:      { value: new Array(16).fill(0) },
@@ -64,25 +60,15 @@ const rayCamera = new RayCamera(
     new THREE.Vector3(0, 0, 5)
 );
 
-// ---- Material → texture URL table -------------------------------------------
-// Resolved from the MTL with fallbacks for two missing files:
-//   Wolf_Body  wants  textures/wolf col.jpg  (404) → fallback to Wolf_Body.jpg
-//   Wolf_Teeth wants  textures/fella3.jpg    (404) → no texture, use Kd
-// Wolf_Claws has no map_Kd in the MTL at all → no texture, use Kd.
-
 const MATERIAL_TEXTURES = {
     'Wolf_Body':  'textures/Wolf_Body.jpg',
     'Wolf_Eyes':  'textures/Wolf_Eyes_1.jpg',
     'Wolf_Fur':   'textures/Wolf_Body.jpg',
-    // Wolf_Claws / Wolf_Teeth: no entry → Kd fallback
 };
 
 const TEX_LAYER_SIZE = 512;
 
-// Load each unique map_Kd JPG, resample to TEX_LAYER_SIZE², and pack into a
-// single DataArrayTexture. Returns the texture plus per-material flags.
 async function loadMaterialTextures(materials, basePath) {
-    // Dedupe URLs so two materials referencing the same image share a layer
     const urlToLayer = new Map();
     for (const m of materials) {
         const url = MATERIAL_TEXTURES[m.name];
@@ -116,7 +102,6 @@ async function loadMaterialTextures(materials, basePath) {
             const img = new Image();
             img.onload = () => {
                 ctx.clearRect(0, 0, TEX_LAYER_SIZE, TEX_LAYER_SIZE);
-                // Flip Y to match OpenGL UV convention (origin bottom-left)
                 ctx.save();
                 ctx.scale(1, -1);
                 ctx.drawImage(img, 0, -TEX_LAYER_SIZE, TEX_LAYER_SIZE, TEX_LAYER_SIZE);
@@ -127,7 +112,7 @@ async function loadMaterialTextures(materials, basePath) {
             };
             img.onerror = (e) => {
                 console.warn(`Material texture ${url} failed to load (layer ${layer})`);
-                resolve(); // resolve so Promise.all doesn't reject; layer stays black
+                resolve();
             };
             img.src = basePath + url;
         });
@@ -145,7 +130,7 @@ async function loadMaterialTextures(materials, basePath) {
     return { texture: tex, hasTex, layerIndex, layerCount };
 }
 
-// ---- MTL + OBJ loader -------------------------------------------------------
+// ---- OBJ loader -------------------------------------------------------------
 
 const mtlLoader = new MTLLoader();
 mtlLoader.setPath('/assets/models/wolf/');
@@ -163,7 +148,7 @@ mtlLoader.load('Wolf_One_obj.mtl', (materials) => {
             // Step 2: build the BVH and get the reordered triangle index array
             const { nodes, orderedTris } = buildBVH(rawPositions);
 
-            // Step 3: reorder position, normal, UV AND matIndex arrays to match BVH leaf order
+            // Step 3: reorder position and normal arrays to match BVH leaf order
             const {
                 rawPositions:  rPos,
                 rawNormals:    rNorm,
@@ -171,7 +156,7 @@ mtlLoader.load('Wolf_One_obj.mtl', (materials) => {
                 rawMatIndices: rMat,
             } = reorderTris(rawPositions, rawNormals, rawUVs, rawMatIndices, orderedTris);
 
-            // Step 4: pack reordered data into GPU textures (matIndex baked into position.w)
+            // Step 4: pack reordered data into GPU textures
             const { positionTexture, normalTexture, uvTexture, triCount, texWidth } = packTextures(rPos, rNorm, rUV, rMat);
 
             // Step 5: pack BVH nodes into a GPU texture
@@ -187,7 +172,6 @@ mtlLoader.load('Wolf_One_obj.mtl', (materials) => {
             material.uniforms.uBVHTexWidth.value   = bvhTexWidth;
             material.uniforms.uFOV.value           = 75.0;
 
-            // Fill uMatAlbedo from extracted materials list (linear-space Kd).
             for (let i = 0; i < materials.length && i < 16; i++) {
                 material.uniforms.uMatAlbedo.value[i].set(
                     materials[i].albedo[0],
@@ -199,8 +183,6 @@ mtlLoader.load('Wolf_One_obj.mtl', (materials) => {
 
             console.log(`Scene loaded: ${triCount} triangles, ${nodeCount} BVH nodes, ${materials.length} materials`);
 
-            // Kick off async texture loading. Picture renders with Kd colors
-            // immediately; textures swap in once all JPGs are decoded.
             loadMaterialTextures(materials, '/assets/models/wolf/').then(({ texture, hasTex, layerIndex }) => {
                 material.uniforms.uMatTextures.value = texture;
                 material.uniforms.uMatHasTex.value   = hasTex;
