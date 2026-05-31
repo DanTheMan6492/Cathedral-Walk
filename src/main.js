@@ -146,7 +146,7 @@ mtlLoader.load('Wolf_One_obj.mtl', (materials) => {
             const { rawPositions, rawNormals, rawUVs, rawMatIndices, materials } = flattenScene(object);
 
             // Step 2: build the BVH and get the reordered triangle index array
-            const { nodes, orderedTris } = buildBVH(rawPositions);
+            const { nodes,  orderedTris} = buildBVH(rawPositions);
 
             // Step 3: reorder position and normal arrays to match BVH leaf order
             const {
@@ -154,6 +154,7 @@ mtlLoader.load('Wolf_One_obj.mtl', (materials) => {
                 rawNormals:    rNorm,
                 rawUVs:        rUV,
                 rawMatIndices: rMat,
+                orderedTris   : orderedTris1
             } = reorderTris(rawPositions, rawNormals, rawUVs, rawMatIndices, orderedTris);
 
             // Step 4: pack reordered data into GPU textures
