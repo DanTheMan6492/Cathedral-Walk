@@ -1,11 +1,12 @@
 import * as THREE from 'three';
-import { OBJLoader } from 'three/examples/jsm/loaders/OBJLoader.js';
-import { MTLLoader } from 'three/examples/jsm/loaders/MTLLoader.js';
 import vertSrc from './shaders/raytrace.vert.glsl?raw';
 import fragSrc from './shaders/raytrace.frag.glsl?raw';
 import { flattenScene, reorderTris, packTextures, packBVH } from './core/ScenePacker.js';
 import { buildBVH } from './core/BVH.js';
-import { RayCamera } from './core/RayCamera.js';
+import { RayCamera } from './core/Raycamera.js';
+import { buildCathedral } from './scene/cathedral.js';
+
+const MATERIAL_LIMIT = 32;
 
 // ---- Three.js setup ---------------------------------------------------------
 // The Three.js camera is frozen at the origin — it exists only to satisfy
@@ -41,11 +42,11 @@ const material = new THREE.RawShaderMaterial({
         uBVHNodeCount:  { value: 0 },
         uBVHTexWidth:   { value: 0 },
         uFOV:           { value: 75.0 },
-        uMatAlbedo:     { value: Array.from({ length: 16 }, () => new THREE.Vector3()) },
+        uMatAlbedo:     { value: Array.from({ length: MATERIAL_LIMIT }, () => new THREE.Vector3()) },
         uMatCount:      { value: 0 },
         uMatTextures:   { value: null },
-        uMatHasTex:     { value: new Array(16).fill(0) },
-        uMatLayer:      { value: new Array(16).fill(0) },
+        uMatHasTex:     { value: new Array(MATERIAL_LIMIT).fill(0) },
+        uMatLayer:      { value: new Array(MATERIAL_LIMIT).fill(0) },
     },
     depthTest: false,
     depthWrite: false,
@@ -60,144 +61,52 @@ const rayCamera = new RayCamera(
     new THREE.Vector3(0, 0, 5)
 );
 
-const MATERIAL_TEXTURES = {
-    'Wolf_Body':  'textures/Wolf_Body.jpg',
-    'Wolf_Eyes':  'textures/Wolf_Eyes_1.jpg',
-    'Wolf_Fur':   'textures/Wolf_Body.jpg',
-};
+function uploadSceneToRaytracer(object) {
+    const { rawPositions, rawNormals, rawUVs, rawMatIndices, materials } = flattenScene(object);
+    const { nodes, orderedTris } = buildBVH(rawPositions);
+    const {
+        rawPositions:  rPos,
+        rawNormals:    rNorm,
+        rawUVs:        rUV,
+        rawMatIndices: rMat,
+    } = reorderTris(rawPositions, rawNormals, rawUVs, rawMatIndices, orderedTris);
+    const { positionTexture, normalTexture, uvTexture, triCount, texWidth } = packTextures(rPos, rNorm, rUV, rMat);
+    const { bvhTexture, nodeCount, texWidth: bvhTexWidth } = packBVH(nodes);
 
-const TEX_LAYER_SIZE = 512;
+    material.uniforms.uPositions.value     = positionTexture;
+    material.uniforms.uNormals.value       = normalTexture;
+    material.uniforms.uUVs.value           = uvTexture;
+    material.uniforms.uTriangleCount.value = triCount;
+    material.uniforms.uTexWidth.value      = texWidth;
+    material.uniforms.uBVH.value           = bvhTexture;
+    material.uniforms.uBVHNodeCount.value  = nodeCount;
+    material.uniforms.uBVHTexWidth.value   = bvhTexWidth;
+    material.uniforms.uFOV.value           = 75.0;
 
-async function loadMaterialTextures(materials, basePath) {
-    const urlToLayer = new Map();
-    for (const m of materials) {
-        const url = MATERIAL_TEXTURES[m.name];
-        if (url && !urlToLayer.has(url)) urlToLayer.set(url, urlToLayer.size);
+    if (materials.length > MATERIAL_LIMIT) {
+        console.warn(`Scene uses ${materials.length} materials; only ${MATERIAL_LIMIT} are available in the shader.`);
     }
 
-    const hasTex     = new Array(16).fill(0);
-    const layerIndex = new Array(16).fill(0);
-    for (let i = 0; i < materials.length; i++) {
-        const url = MATERIAL_TEXTURES[materials[i].name];
-        if (url) {
-            hasTex[i]     = 1;
-            layerIndex[i] = urlToLayer.get(url);
-        }
+    for (let i = 0; i < Math.min(materials.length, MATERIAL_LIMIT); i++) {
+        material.uniforms.uMatAlbedo.value[i].set(
+            materials[i].albedo[0],
+            materials[i].albedo[1],
+            materials[i].albedo[2],
+        );
     }
+    material.uniforms.uMatCount.value = Math.min(materials.length, MATERIAL_LIMIT);
+    material.uniforms.uMatHasTex.value = new Array(MATERIAL_LIMIT).fill(0);
+    material.uniforms.uMatLayer.value = new Array(MATERIAL_LIMIT).fill(0);
 
-    if (urlToLayer.size === 0) {
-        return { texture: null, hasTex, layerIndex, layerCount: 0 };
-    }
-
-    const layerCount = urlToLayer.size;
-    const buffer     = new Uint8Array(TEX_LAYER_SIZE * TEX_LAYER_SIZE * 4 * layerCount);
-
-    const canvas = document.createElement('canvas');
-    canvas.width  = TEX_LAYER_SIZE;
-    canvas.height = TEX_LAYER_SIZE;
-    const ctx = canvas.getContext('2d',{willReadFrequently: true});
-
-    await Promise.all([...urlToLayer.entries()].map(([url, layer]) => {
-        return new Promise((resolve, reject) => {
-            const img = new Image();
-            img.onload = () => {
-                ctx.clearRect(0, 0, TEX_LAYER_SIZE, TEX_LAYER_SIZE);
-                ctx.save();
-                ctx.scale(1, -1);
-                ctx.drawImage(img, 0, -TEX_LAYER_SIZE, TEX_LAYER_SIZE, TEX_LAYER_SIZE);
-                ctx.restore();
-                const imgData = ctx.getImageData(0, 0, TEX_LAYER_SIZE, TEX_LAYER_SIZE);
-                buffer.set(imgData.data, layer * TEX_LAYER_SIZE * TEX_LAYER_SIZE * 4);
-                resolve();
-            };
-            img.onerror = (e) => {
-                console.warn(`Material texture ${url} failed to load (layer ${layer})`);
-                resolve();
-            };
-            img.src = basePath + url;
-        });
-    }));
-
-    const tex = new THREE.DataArrayTexture(buffer, TEX_LAYER_SIZE, TEX_LAYER_SIZE, layerCount);
-    tex.format      = THREE.RGBAFormat;
-    tex.type        = THREE.UnsignedByteType;
-    tex.wrapS       = THREE.RepeatWrapping;
-    tex.wrapT       = THREE.RepeatWrapping;
-    tex.minFilter   = THREE.LinearFilter;
-    tex.magFilter   = THREE.LinearFilter;
-    tex.needsUpdate = true;
-
-    return { texture: tex, hasTex, layerIndex, layerCount };
+    console.log(`Scene loaded: ${triCount} triangles, ${nodeCount} BVH nodes, ${materials.length} materials`);
 }
 
-// ---- OBJ loader -------------------------------------------------------------
-
-const mtlLoader = new MTLLoader();
-mtlLoader.setPath('/assets/models/wolf/');
-mtlLoader.load('Wolf_One_obj.mtl', (materials) => {
-    materials.preload();
-
-    const objLoader = new OBJLoader();
-    objLoader.setMaterials(materials);
-    objLoader.load(
-        '/assets/models/wolf/Wolf_One_obj.obj',
-        (object) => {
-            // Step 1: extract raw triangle data from the scene graph
-            const { rawPositions, rawNormals, rawUVs, rawMatIndices, materials } = flattenScene(object);
-
-            // Step 2: build the BVH and get the reordered triangle index array
-            const { nodes,  orderedTris} = buildBVH(rawPositions);
-
-            // Step 3: reorder position and normal arrays to match BVH leaf order
-            const {
-                rawPositions:  rPos,
-                rawNormals:    rNorm,
-                rawUVs:        rUV,
-                rawMatIndices: rMat,
-                orderedTris   : orderedTris1
-            } = reorderTris(rawPositions, rawNormals, rawUVs, rawMatIndices, orderedTris);
-
-            // Step 4: pack reordered data into GPU textures
-            const { positionTexture, normalTexture, uvTexture, triCount, texWidth } = packTextures(rPos, rNorm, rUV, rMat);
-
-            // Step 5: pack BVH nodes into a GPU texture
-            const { bvhTexture, nodeCount, texWidth: bvhTexWidth } = packBVH(nodes);
-
-            material.uniforms.uPositions.value     = positionTexture;
-            material.uniforms.uNormals.value       = normalTexture;
-            material.uniforms.uUVs.value           = uvTexture;
-            material.uniforms.uTriangleCount.value = triCount;
-            material.uniforms.uTexWidth.value      = texWidth;
-            material.uniforms.uBVH.value           = bvhTexture;
-            material.uniforms.uBVHNodeCount.value  = nodeCount;
-            material.uniforms.uBVHTexWidth.value   = bvhTexWidth;
-            material.uniforms.uFOV.value           = 75.0;
-
-            for (let i = 0; i < materials.length && i < 16; i++) {
-                material.uniforms.uMatAlbedo.value[i].set(
-                    materials[i].albedo[0],
-                    materials[i].albedo[1],
-                    materials[i].albedo[2],
-                );
-            }
-            material.uniforms.uMatCount.value = materials.length;
-
-            console.log(`Scene loaded: ${triCount} triangles, ${nodeCount} BVH nodes, ${materials.length} materials`);
-
-            loadMaterialTextures(materials, '/assets/models/wolf/').then(({ texture, hasTex, layerIndex }) => {
-                material.uniforms.uMatTextures.value = texture;
-                material.uniforms.uMatHasTex.value   = hasTex;
-                material.uniforms.uMatLayer.value    = layerIndex;
-            });
-        },
-        (xhr) => {
-            if (xhr.total) {
-                console.log(`Loading: ${(xhr.loaded / xhr.total * 100).toFixed(1)}%`);
-            }
-        },
-        (error) => console.error('OBJLoader error:', error)
-    );
-}, undefined, (error) => console.error('MTLLoader error:', error));
+const cathedral = buildCathedral();
+rayCamera.position.copy(cathedral.spawn.position);
+rayCamera.yaw = cathedral.spawn.yaw;
+rayCamera.pitch = cathedral.spawn.pitch;
+material.uniforms.uLightPos.value.set(0, cathedral.bounds.height - 3, 0);
+uploadSceneToRaytracer(cathedral.group);
 
 // ---- Resize handler ---------------------------------------------------------
 const renderscale=0.5;

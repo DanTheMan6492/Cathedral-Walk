@@ -26,22 +26,28 @@ export function flattenScene(object) {
 
     const materialMap = new Map();
     const materials   = [];
+    const defaultColor = new THREE.Color(0xdddddd);
+    const defaultMaterial = { name: 'default', uuid: 'default', color: defaultColor };
 
     const linearToSRGB = (c) => Math.pow(Math.max(0, c), 1 / 2.2);
 
-    function internMaterial(name, color) {
-        if (materialMap.has(name)) return materialMap.get(name).index;
+    function internMaterial(material) {
+        const mat = material ?? defaultMaterial;
+        const color = mat.color ?? defaultColor;
+        const key = mat.name || mat.uuid || `color-${color.getHexString()}`;
+        if (materialMap.has(key)) return materialMap.get(key).index;
         const index  = materials.length;
         const albedo = [
             linearToSRGB(color.r),
             linearToSRGB(color.g),
             linearToSRGB(color.b),
         ];
-        materialMap.set(name, { index, albedo });
-        materials.push({ name, albedo });
+        materialMap.set(key, { index, albedo });
+        materials.push({ name: mat.name || key, albedo });
         return index;
     }
 
+    object.updateMatrixWorld(true);
     object.traverse(child => {
         if (!child.isMesh) return;
 
@@ -58,13 +64,16 @@ export function flattenScene(object) {
         const groups = geo.groups.length > 0
             ? geo.groups
             : [{ start: 0, count: (index ? index.count : posAttr.count), materialIndex: 0 }];
+        const normalMatrix = new THREE.Matrix3().getNormalMatrix(child.matrixWorld);
+        const transformedPos = new THREE.Vector3();
+        const transformedNorm = new THREE.Vector3();
 
         const triMatIndex = new Array(triCount).fill(0);
         for (const g of groups) {
             const triStart = (g.start             / 3) | 0;
             const triEnd   = ((g.start + g.count) / 3) | 0;
-            const mat      = childMats[g.materialIndex];
-            const matIdx   = internMaterial(mat.name, mat.color);
+            const mat      = childMats[g.materialIndex] ?? childMats[0] ?? defaultMaterial;
+            const matIdx   = internMaterial(mat);
             for (let t = triStart; t < triEnd; t++) triMatIndex[t] = matIdx;
         }
 
@@ -73,13 +82,19 @@ export function flattenScene(object) {
             const b = index ? index.getX(i * 3 + 1) : i * 3 + 1;
             const c = index ? index.getX(i * 3 + 2) : i * 3 + 2;
 
-            positions.push(posAttr.getX(a), posAttr.getY(a), posAttr.getZ(a), 0.0);
-            positions.push(posAttr.getX(b), posAttr.getY(b), posAttr.getZ(b), 0.0);
-            positions.push(posAttr.getX(c), posAttr.getY(c), posAttr.getZ(c), 0.0);
+            transformedPos.fromBufferAttribute(posAttr, a).applyMatrix4(child.matrixWorld);
+            positions.push(transformedPos.x, transformedPos.y, transformedPos.z, 0.0);
+            transformedPos.fromBufferAttribute(posAttr, b).applyMatrix4(child.matrixWorld);
+            positions.push(transformedPos.x, transformedPos.y, transformedPos.z, 0.0);
+            transformedPos.fromBufferAttribute(posAttr, c).applyMatrix4(child.matrixWorld);
+            positions.push(transformedPos.x, transformedPos.y, transformedPos.z, 0.0);
 
-            normals.push(normAttr.getX(a), normAttr.getY(a), normAttr.getZ(a), 0.0);
-            normals.push(normAttr.getX(b), normAttr.getY(b), normAttr.getZ(b), 0.0);
-            normals.push(normAttr.getX(c), normAttr.getY(c), normAttr.getZ(c), 0.0);
+            transformedNorm.fromBufferAttribute(normAttr, a).applyMatrix3(normalMatrix).normalize();
+            normals.push(transformedNorm.x, transformedNorm.y, transformedNorm.z, 0.0);
+            transformedNorm.fromBufferAttribute(normAttr, b).applyMatrix3(normalMatrix).normalize();
+            normals.push(transformedNorm.x, transformedNorm.y, transformedNorm.z, 0.0);
+            transformedNorm.fromBufferAttribute(normAttr, c).applyMatrix3(normalMatrix).normalize();
+            normals.push(transformedNorm.x, transformedNorm.y, transformedNorm.z, 0.0);
 
             if (uvAttr) {
                 uvs.push(uvAttr.getX(a), uvAttr.getY(a), 0.0, 0.0);

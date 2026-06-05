@@ -25,7 +25,7 @@ uniform int uBVHNodeCount;
 uniform int uBVHTexWidth;
 uniform float uFOV;
 
-const int MAX_MATERIALS = 16;
+const int MAX_MATERIALS = 32;
 uniform vec3 uMatAlbedo[MAX_MATERIALS];
 uniform int  uMatCount;
 
@@ -388,52 +388,8 @@ HitRecord intersectScene(vec3 ro, vec3 rd,bool isshadow, float lightdist) {
 
     HitRecord h;
 
-    // ---- Hardcoded objects ------------------------------------------------
-    // TODO: replace with a uniform buffer once the scene is dynamic
-
-    Object s0;
-    s0.type       = TYPE_SPHERE;
-    s0.data0      = vec3(-2.5, 0.0, -5.0);
-    s0.data1      = vec3(1.0, 0.0, 0.0);
-    s0.mat.type   = MAT_DIFFUSE;
-    s0.mat.albedo = vec3(0.85, 0.25, 0.15);
-    s0.mat.ior    = 1.0;
-    h = intersect(s0, ro, rd);
-    if (h.hit && h.t < closest.t) closest = h;
-
-    Object s1;
-    s1.type       = TYPE_SPHERE;
-    s1.data0      = vec3(0.0, 0.0, -5.0);
-    s1.data1      = vec3(1.0, 0.0, 0.0);
-    s1.mat.type   = MAT_REFLECTIVE;
-    s1.mat.albedo = vec3(0.92, 0.92, 0.92);
-    s1.mat.ior    = 1.0;
-    h = intersect(s1, ro, rd);
-    if (h.hit && h.t < closest.t) closest = h;
-
-    Object s2;
-    s2.type       = TYPE_SPHERE;
-    s2.data0      = vec3(2.5, 0.0, -5.0);
-    s2.data1      = vec3(1.0, 0.0, 0.0);
-    s2.mat.type   = MAT_TRANSPARENT;
-    s2.mat.albedo = vec3(0.96, 0.98, 1.0);
-    s2.mat.ior    = 1.5;
-    h = intersect(s2, ro, rd);
-    if (h.hit && h.t < closest.t) closest = h;
-
-    Object p0;
-    p0.type       = TYPE_PLANE;
-    p0.data0      = vec3(0.0, -1.2, 0.0);
-    p0.data1      = vec3(0.0,  1.0, 0.0);
-    p0.mat.type   = MAT_DIFFUSE;
-    p0.mat.albedo = vec3(0.8);
-    p0.mat.ior    = 1.0;
-    h = intersect(p0, ro, rd);
-    if (h.hit && h.t < closest.t) closest = h;
-
     // ---- BVH triangle traversal -------------------------------------------
-    // Replaces the old brute force loop — only tests triangles the BVH
-    // directs us to rather than all uTriangleCount triangles.
+    // The cathedral is flattened into triangles and traversed through the BVH.
 
     if (uBVHNodeCount > 0) {
         h = intersectBVH(ro, rd, isshadow, lightdist);
