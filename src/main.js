@@ -6,6 +6,8 @@ import { buildBVH } from './core/BVH.js';
 import { RayCamera } from './core/Raycamera.js';
 import { buildCathedral } from './scene/cathedral.js';
 
+
+
 const MATERIAL_LIMIT = 32;
 const canvas = document.getElementById('app');
 const viewport = document.getElementById('viewport');
@@ -43,6 +45,8 @@ const rasterCamera = new THREE.PerspectiveCamera(75, 1, 0.1, 1000);
 const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
 renderer.setPixelRatio(1);
 renderer.glslVersion = THREE.GLSL3;
+
+
 
 // ---- Full-screen quad -------------------------------------------------------
 
