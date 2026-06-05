@@ -43,7 +43,11 @@ export function flattenScene(object) {
             linearToSRGB(color.b),
         ];
         materialMap.set(key, { index, albedo });
-        materials.push({ name: mat.name || key, albedo });
+        materials.push({
+            name: mat.name || key,
+            albedo,
+            type: mat.userData?.rayType ?? 0,
+        });
         return index;
     }
 

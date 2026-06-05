@@ -70,6 +70,7 @@ const material = new THREE.RawShaderMaterial({
         uMatTextures:   { value: null },
         uMatHasTex:     { value: new Array(MATERIAL_LIMIT).fill(0) },
         uMatLayer:      { value: new Array(MATERIAL_LIMIT).fill(0) },
+        uMatType:       { value: new Array(MATERIAL_LIMIT).fill(0) },
     },
     depthTest: false,
     depthWrite: false,
@@ -120,21 +121,32 @@ function uploadSceneToRaytracer(object) {
     material.uniforms.uMatCount.value = Math.min(materials.length, MATERIAL_LIMIT);
     material.uniforms.uMatHasTex.value = new Array(MATERIAL_LIMIT).fill(0);
     material.uniforms.uMatLayer.value = new Array(MATERIAL_LIMIT).fill(0);
+    material.uniforms.uMatType.value = new Array(MATERIAL_LIMIT).fill(0);
+    for (let i = 0; i < Math.min(materials.length, MATERIAL_LIMIT); i++) {
+        material.uniforms.uMatType.value[i] = materials[i].type ?? 0;
+    }
 
     console.log(`Scene loaded: ${triCount} triangles, ${nodeCount} BVH nodes, ${materials.length} materials`);
 }
 
 const cathedral = buildCathedral();
+const exteriorLightPosition = new THREE.Vector3(
+    -14,
+    cathedral.bounds.height * 0.72,
+    cathedral.bounds.width * 0.5 + 24,
+);
 rayCamera.position.copy(cathedral.spawn.position);
 rayCamera.yaw = cathedral.spawn.yaw;
 rayCamera.pitch = cathedral.spawn.pitch;
-material.uniforms.uLightPos.value.set(0, cathedral.bounds.height - 3, 0);
+material.uniforms.uLightPos.value.copy(exteriorLightPosition);
 uploadSceneToRaytracer(cathedral.group);
 rasterScene.add(cathedral.group);
-rasterScene.add(new THREE.AmbientLight(0xf2ead8, 0.42));
-const rasterKeyLight = new THREE.DirectionalLight(0xfff3d0, 0.9);
-rasterKeyLight.position.set(-12, 28, 18);
+rasterScene.add(new THREE.AmbientLight(0xf2ead8, 0.24));
+const rasterKeyLight = new THREE.DirectionalLight(0xfff3d0, 1.55);
+rasterKeyLight.position.copy(exteriorLightPosition);
+rasterKeyLight.target.position.set(-4, 2.6, 0);
 rasterScene.add(rasterKeyLight);
+rasterScene.add(rasterKeyLight.target);
 
 // ---- UI and resize handler --------------------------------------------------
 

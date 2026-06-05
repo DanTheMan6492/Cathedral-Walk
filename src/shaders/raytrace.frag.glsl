@@ -32,6 +32,7 @@ uniform int  uMatCount;
 uniform sampler2DArray uMatTextures;
 uniform int uMatHasTex[MAX_MATERIALS];
 uniform int uMatLayer [MAX_MATERIALS];
+uniform int uMatType  [MAX_MATERIALS];
 
 out vec4 fragColor;
 
@@ -180,7 +181,11 @@ HitRecord intersectTriangle(Object obj, vec3 ro, vec3 rd) {
     //check if ray and plane are parallel
     float checkrayplane;
 
-    if (det < 0.0001) return h;
+    if (obj.mat.type == MAT_TRANSPARENT) {
+        if (abs(det) < 0.0001) return h;
+    } else if (det < 0.0001) {
+        return h;
+    }
 
     float invDet = 1.0/(det);
     vec3  tvec   = ro - v0;
@@ -327,9 +332,9 @@ HitRecord intersectBVH(vec3 ro, vec3 rd,bool isshadow, float lightdist) {
 
                 Object tri;
                 tri.type       = TYPE_TRIANGLE;
-                tri.mat.type   = MAT_DIFFUSE;
+                tri.mat.type   = uMatType[matIndex];
                 tri.mat.albedo = uMatAlbedo[matIndex];
-                tri.mat.ior    = 1.0;
+                tri.mat.ior    = tri.mat.type == MAT_TRANSPARENT ? 1.5 : 1.0;
                 tri.data0 = v0Texel.xyz;
                 tri.data1 = fetchTexel(uPositions, base3 + 1);
                 tri.data2 = fetchTexel(uPositions, base3 + 2);
@@ -338,9 +343,6 @@ HitRecord intersectBVH(vec3 ro, vec3 rd,bool isshadow, float lightdist) {
 
                 if (h.hit && h.t < closest.t) {
                     closest = h;
-                    if (isshadow && closest.t < lightdist) {
-                        return closest;
-                    }
                     closest.normal = normalize(
                         (1.0-h.u-h.v)* fetchTexel(uNormals, base3 + 0) +
                         h.u*fetchTexel(uNormals, base3 + 1) +
@@ -401,14 +403,29 @@ HitRecord intersectScene(vec3 ro, vec3 rd,bool isshadow, float lightdist) {
 
 // ---- Shadow ray ------------------------------------------------------------
 
-bool inShadow(vec3 pos) {
+vec3 shadowTransmission(vec3 pos) {
     vec3  toLight   = uLightPos - pos;
     float lightDist = length(toLight);
     vec3  srd       = toLight / lightDist;
     vec3  sro       = pos + srd * 0.002;
+    vec3  transmission = vec3(1.0);
+    float traveled = 0.0;
 
-    HitRecord h = intersectScene(sro, srd, true, lightDist);
-    return h.hit && h.t < lightDist;
+    for (int i = 0; i < 10; i++) {
+        HitRecord h = intersectScene(sro, srd, false, lightDist - traveled);
+        if (!h.hit || traveled + h.t >= lightDist) break;
+
+        if (h.matType == MAT_TRANSPARENT) {
+            vec3 tint = clamp(h.albedo * 1.35, vec3(0.04), vec3(1.0));
+            transmission *= tint;
+            traveled += h.t + 0.08;
+            sro = h.pos + srd * 0.08;
+        } else {
+            return transmission * 0.08;
+        }
+    }
+
+    return transmission;
 }
 
 // ---- Helpers ---------------------------------------------------------------
@@ -420,9 +437,9 @@ vec3 skyColor(vec3 rd) {
 
 vec3 shadeDiffuse(HitRecord h) {
     vec3  toLight = normalize(uLightPos - h.pos);
-    float shadow  = inShadow(h.pos) ? 0.1 : 1.0;
-    float diff    = max(dot(h.normal, toLight), 0.0) * shadow;
-    return h.albedo * (diff + 0.15);
+    vec3  lightThroughScene = shadowTransmission(h.pos);
+    float diff    = max(dot(h.normal, toLight), 0.0);
+    return h.albedo * (diff * lightThroughScene + 0.15);
 }
 
 // ---- Bounce helper ---------------------------------------------------------

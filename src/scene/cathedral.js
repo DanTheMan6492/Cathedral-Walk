@@ -665,9 +665,6 @@ function addChandeliers(group, xs) {
             const px = x + Math.sin(a) * 1.05;
             addSphere(group, 0.12, px, y, z, matGlassA, 10, 'chandelier-light');
         }
-        const light = new THREE.PointLight(0xffd58a, 0.45, 18);
-        light.position.set(x, 14.6, 0);
-        group.add(light);
     }
 }
 
