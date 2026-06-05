@@ -46,7 +46,22 @@ const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
 renderer.setPixelRatio(1);
 renderer.glslVersion = THREE.GLSL3;
 
+// ---- Audio setup ---------------------------------------------------------
 
+const listener = new THREE.AudioListener();
+screenCamera.add(listener);
+
+// 2. Create a global audio source
+const sound = new THREE.Audio(listener);
+
+// 3. Load a sound and set it as the Audio object's buffer
+const audioLoader = new THREE.AudioLoader();
+audioLoader.load('assets/Audio/organ.mp3', function(buffer) {
+    sound.setBuffer(buffer);
+    sound.setLoop(true); // Set to true for background music
+    sound.setVolume(0.5);
+    sound.play(); // Starts playing immediately
+});
 
 // ---- Full-screen quad -------------------------------------------------------
 
